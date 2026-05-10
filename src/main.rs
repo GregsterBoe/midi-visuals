@@ -135,6 +135,14 @@ fn view(app: &App, model: &Model, frame: Frame) {
             .x_y(hud_x + 185.0, hud_y)
             .radius(5.0)
             .color(dot_color);
+
+        if let Some(info) = model.active.hud_info() {
+            draw.text(&info)
+                .color(GRAY)
+                .font_size(13)
+                .x_y(hud_x + 90.0, hud_y - 20.0)
+                .w_h(180.0, 20.0);
+        }
     }
 
     draw.to_frame(app, &frame).unwrap();

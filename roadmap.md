@@ -190,7 +190,7 @@ a warning, and pressing `Tab` cycles through everything in the registry.
 
 ---
 
-## Phase 4 — Second sketch and a debug HUD `[CURRENT]`
+## Phase 4 — Second sketch and a debug HUD `[DONE]`
 
 **Goal:** validate the abstraction by adding a second, deliberately different
 sketch, and add an on-screen overlay so you can see what's happening at a
@@ -218,7 +218,7 @@ multi-sketch MIDI visualizer. Everything after this is making it richer.
 
 ---
 
-## Phase 5 — First particle sketch `[TODO]`
+## Phase 5 — First particle sketch `[CURRENT]`
 
 **Goal:** prove the architecture handles many objects, establish a baseline
 for the performance work that comes later.

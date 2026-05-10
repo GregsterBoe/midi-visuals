@@ -5,9 +5,10 @@ A MIDI-reactive visual synthesizer written in Rust using [Nannou](https://nannou
 ## Run
 
 ```
-cargo run              # start on the default sketch (aurora)
-cargo run -- aurora    # start on a specific sketch by name
+cargo run                # start on the default sketch (aurora)
+cargo run -- aurora      # start on a specific sketch by name
 cargo run -- grid
+cargo run -- particles
 ```
 
 ## Keyboard shortcuts
@@ -33,6 +34,19 @@ A glowing circle driven by four knobs.
 
 ### grid
 An 8×8 grid of cells. Each note-on event lights up the cell at `note % 64` with the note's velocity, then fades out over ~0.7 s.
+
+### particles
+Note-on events spawn bursts of particles that fly outward, fade, and die. Five knobs shape the behaviour.
+
+| CC | Parameter   | Range                        |
+|----|-------------|------------------------------|
+| 24 | Base hue    | full spectrum                |
+| 25 | Hue spread  | 0 = monochrome, 1 = wide mix |
+| 26 | Gravity     | 0 = none, 1 = strong pull    |
+| 27 | Drag        | 0 = none, 1 = heavy          |
+| 28 | Spawn count | 1 – 50 per note              |
+
+The HUD shows the live particle count. Watch it to find where FPS starts to drop.
 
 ## Requirements
 
