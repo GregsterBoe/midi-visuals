@@ -1,0 +1,8 @@
+[package]
+name = "midi-visuals"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nannou = "0.19"
+midir = "0.9"
