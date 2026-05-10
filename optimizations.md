@@ -173,5 +173,49 @@ Phase 7 step 2 (instanced rendering via a custom `wgpu` pipeline).
 
 ---
 
+### `droplets`
+
+**Pass 1 — per-call tessellation** *(~10 FPS → 60 FPS at 400 droplets)*
+
+**Bottleneck removed:** `view()` submitted up to 7,500 `draw.rect()` calls (one per visible
+trail cell at 800×600 / 8 px) plus 400 `draw.ellipse()` + 400 `draw.line()` calls per frame.
+Every call tessellates on the CPU. At 400 droplets this collapsed to ~10 FPS.
+
+**What was done:**
+- Added mesh buffers: `trail_verts/trail_idx` (trail cells) and `drop_verts/drop_idx`
+  (droplet tails + heads). Pre-allocated at startup.
+- `build_trail_mesh()` + `build_drop_mesh()` emit quads into the two buffers.
+  - Each trail cell → 1 quad (4 verts + 6 indices).
+  - Each droplet tail → 1 thin quad along the movement vector (skip if stationary).
+  - Each droplet head → 1 quad (2 triangles vs ~64 for `draw.ellipse()`).
+- `view()` replaced with two `draw.mesh().indexed_colored()` calls.
+- Tail quad uses `vec2(-dir.y, dir.x).normalize() * 0.5` for the perpendicular
+  half-width — avoids `.perp()` which is not available in the Nannou 0.19 / glam version.
+
+**Pass 2 — trail rebuild cost + color conversion** *(60 FPS → 30 FPS once trail saturates → fixed)*
+
+**Two bottlenecks removed:**
+
+**A. Per-vertex sRGB→linear gamma conversion in `draw.mesh().indexed_colored()`.**
+The mesh API trait bound is `C: IntoLinSrgba<f32>`. With `Srgba<f32>` as the stored
+color, every vertex triggers a gamma decode (`pow(2.4)`) per RGB channel. At ~30,000
+trail vertices × 3 channels × 60 fps, this is ~5.4 M expensive float ops per second.
+Fix: changed vertex color type to `LinSrgba<f32>`. `IntoLinSrgba<f32>` for `LinSrgba`
+is a no-op copy — zero conversion cost. Colors appear slightly brighter (HSL values
+are now treated as linear rather than sRGB), which is visually acceptable for a
+music visualizer.
+
+**B. Trail mesh rebuilt from scratch every frame.**
+As the trail saturates (~7,500 cells at 800×600 / 8 px), rebuild_trail_mesh emits
+~30,000 vertices and ~45,000 indices each frame even though the trail changes slowly.
+Fix: split into `build_trail_mesh()` (called every `TRAIL_REBUILD_INTERVAL = 3` frames)
+and `build_drop_mesh()` (called every frame). Reduces trail rebuild rate from 60/s to
+20/s at 60 fps. The 3-frame lag (~50 ms) is below human perception for a slowly-fading field.
+
+**Ordering with two draw calls:** trail vertices are placed at `z = -1.0`; drop
+vertices remain at `z = 0.0`. Nannou sorts draw primitives by z-value, so trail
+always sorts before drops — deterministic without merging into one mesh. (The previous
+combined-mesh approach was needed only because both calls used the same z = 0.0.)
+
 *Add a new section under "Per-Sketch" for each sketch that receives a
 non-trivial optimization pass.*

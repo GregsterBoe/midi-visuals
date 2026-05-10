@@ -1,4 +1,5 @@
 pub mod aurora;
+pub mod droplets;
 pub mod grid;
 pub mod particles;
 
@@ -41,6 +42,7 @@ pub type SketchFactory = fn() -> Box<dyn Sketch>;
 pub fn registry() -> Vec<(&'static str, SketchFactory)> {
     vec![
         ("aurora",    || Box::new(aurora::Aurora::new())),
+        ("droplets",  || Box::new(droplets::Droplets::new())),
         ("grid",      || Box::new(grid::Grid::new())),
         ("particles", || Box::new(particles::Particles::new())),
     ]
