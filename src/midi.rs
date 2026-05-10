@@ -118,6 +118,12 @@ pub fn start() -> (Arc<Mutex<MidiState>>, Option<MidiInputConnection<()>>) {
     }
 }
 
+impl MidiState {
+    pub fn note_on_events(&self) -> impl Iterator<Item = &NoteEvent> {
+        self.recent_events.iter().filter(|e| e.on)
+    }
+}
+
 fn push_event(queue: &mut VecDeque<NoteEvent>, event: NoteEvent) {
     if queue.len() >= 64 {
         queue.pop_front();

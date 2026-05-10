@@ -1,10 +1,16 @@
 use crate::midi::MidiState;
-use crate::sketches::Sketch;
+use crate::sketches::{Param, Sketch};
 use nannou::prelude::*;
 use nannou::rand::{thread_rng, Rng};
 
-// CC 24 = base hue | CC 25 = hue spread | CC 26 = gravity
-// CC 27 = drag     | CC 28 = spawn count (1–50 per note)
+const PARAMS: &[Param] = &[
+    Param::new(24, "hue",       0.0,   1.0),
+    Param::new(25, "hue_spread", 0.0,  0.5),
+    Param::new(26, "gravity",   0.0, 500.0),
+    Param::new(27, "drag",      0.0,   4.0),
+    Param::new(28, "spawn",     1.0,  50.0),
+];
+
 pub struct Particles {
     particles: Vec<Particle>,
 }
@@ -46,11 +52,11 @@ impl Particles {
 
 impl Sketch for Particles {
     fn update(&mut self, midi: &MidiState, dt: f32) {
-        let gravity = midi.ccs[26] * 500.0;
-        let drag = midi.ccs[27] * 4.0;
-        let spawn_count = (1.0 + midi.ccs[28] * 49.0) as usize;
-        let base_hue = midi.ccs[24];
-        let hue_spread = midi.ccs[25] * 0.5;
+        let gravity     = PARAMS[2].read(midi);
+        let drag        = PARAMS[3].read(midi);
+        let spawn_count = PARAMS[4].read(midi) as usize;
+        let base_hue    = PARAMS[0].read(midi);
+        let hue_spread  = PARAMS[1].read(midi);
 
         for p in &mut self.particles {
             p.vel.y -= gravity * dt;
@@ -60,9 +66,10 @@ impl Sketch for Particles {
         }
         self.particles.retain(|p| p.lifetime > 0.0);
 
-        for event in &midi.recent_events {
-            if event.on && self.particles.len() < 10_000 {
-                self.spawn(spawn_count, base_hue, hue_spread);
+        for _ in midi.note_on_events() {
+            let remaining = 10_000usize.saturating_sub(self.particles.len());
+            if remaining > 0 {
+                self.spawn(spawn_count.min(remaining), base_hue, hue_spread);
             }
         }
     }
@@ -72,14 +79,14 @@ impl Sketch for Particles {
             let alpha = (p.lifetime / p.max_lifetime).powi(2);
             draw.ellipse()
                 .xy(p.pos)
-                .radius(3.0)
+                .radius(3.0_f32)
                 .color(hsla(p.hue, 0.9, 0.6, alpha));
         }
     }
 
-    fn name(&self) -> &'static str {
-        "particles"
-    }
+    fn name(&self) -> &'static str { "particles" }
+
+    fn params(&self) -> &[Param] { PARAMS }
 
     fn hud_info(&self) -> Option<String> {
         Some(format!("{} particles", self.particles.len()))

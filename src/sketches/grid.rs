@@ -21,10 +21,8 @@ impl Sketch for Grid {
         for b in &mut self.brightness {
             *b = (*b - dt * 1.5).max(0.0);
         }
-        for event in &midi.recent_events {
-            if event.on {
-                self.brightness[event.note as usize % CELLS] = event.velocity;
-            }
+        for event in midi.note_on_events() {
+            self.brightness[event.note as usize % CELLS] = event.velocity;
         }
     }
 

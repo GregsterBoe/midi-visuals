@@ -1,8 +1,14 @@
 use crate::midi::MidiState;
-use crate::sketches::Sketch;
+use crate::sketches::{Param, Sketch};
 use nannou::prelude::*;
 
-// CC 24 = hue | CC 25 = radius | CC 26 = saturation | CC 27 = lightness
+const PARAMS: &[Param] = &[
+    Param::new(24, "hue",        0.0,   1.0),
+    Param::new(25, "radius",    40.0, 300.0),
+    Param::new(26, "saturation", 0.5,   1.0),
+    Param::new(27, "lightness",  0.3,   0.7),
+];
+
 pub struct Aurora {
     hue: f32,
     radius: f32,
@@ -18,10 +24,10 @@ impl Aurora {
 
 impl Sketch for Aurora {
     fn update(&mut self, midi: &MidiState, _dt: f32) {
-        self.hue = midi.ccs[24];
-        self.radius = 40.0 + midi.ccs[25] * 260.0;
-        self.saturation = 0.5 + midi.ccs[26] * 0.5;
-        self.lightness = 0.3 + midi.ccs[27] * 0.4;
+        self.hue        = PARAMS[0].read(midi);
+        self.radius     = PARAMS[1].read(midi);
+        self.saturation = PARAMS[2].read(midi);
+        self.lightness  = PARAMS[3].read(midi);
     }
 
     fn view(&self, draw: &Draw, _win: Rect) {
@@ -31,7 +37,7 @@ impl Sketch for Aurora {
             .color(hsl(self.hue, self.saturation, self.lightness));
     }
 
-    fn name(&self) -> &'static str {
-        "aurora"
-    }
+    fn name(&self) -> &'static str { "aurora" }
+
+    fn params(&self) -> &[Param] { PARAMS }
 }

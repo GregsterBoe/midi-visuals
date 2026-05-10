@@ -13,6 +13,18 @@ fn main() {
     nannou::app(model).update(update).run();
 }
 
+fn print_sketch_info(sketch: &dyn Sketch) {
+    let params = sketch.params();
+    if params.is_empty() {
+        println!("Sketch: {}", sketch.name());
+    } else {
+        let mapping: Vec<String> = params.iter()
+            .map(|p| format!("CC{}={}", p.cc, p.name))
+            .collect();
+        println!("Sketch: {}  [{}]", sketch.name(), mapping.join("  "));
+    }
+}
+
 struct Model {
     midi_state: Arc<Mutex<MidiState>>,
     _midi_conn: Option<MidiInputConnection<()>>,
@@ -47,7 +59,7 @@ fn model(app: &App) -> Model {
     };
 
     let active = reg[idx].1();
-    println!("Sketch: {}", reg[idx].0);
+    print_sketch_info(&*active);
 
     Model {
         midi_state,
@@ -66,7 +78,7 @@ fn key_pressed(_app: &App, model: &mut Model, key: Key) {
         Key::Tab => {
             model.sketch_idx = (model.sketch_idx + 1) % model.registry.len();
             model.active = model.registry[model.sketch_idx].1();
-            println!("Sketch: {}", model.registry[model.sketch_idx].0);
+            print_sketch_info(&*model.active);
         }
         Key::H => model.show_hud = !model.show_hud,
         _ => {}
@@ -136,12 +148,25 @@ fn view(app: &App, model: &Model, frame: Frame) {
             .radius(5.0)
             .color(dot_color);
 
+        let mut next_y = hud_y - 20.0;
+
         if let Some(info) = model.active.hud_info() {
             draw.text(&info)
                 .color(GRAY)
                 .font_size(13)
-                .x_y(hud_x + 90.0, hud_y - 20.0)
+                .x_y(hud_x + 90.0, next_y)
                 .w_h(180.0, 20.0);
+            next_y -= 18.0;
+        }
+
+        for param in model.active.params() {
+            let val = param.read_from(&model.prev_ccs);
+            draw.text(&format!("CC{:02} {:<10} {:.2}", param.cc, param.name, val))
+                .color(DIMGRAY)
+                .font_size(12)
+                .x_y(hud_x + 95.0, next_y)
+                .w_h(200.0, 16.0);
+            next_y -= 16.0;
         }
     }
 
