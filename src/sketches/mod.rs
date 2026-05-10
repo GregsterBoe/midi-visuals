@@ -33,6 +33,7 @@ pub trait Sketch {
     fn name(&self) -> &'static str;
     fn params(&self) -> &[Param] { &[] }
     fn hud_info(&self) -> Option<String> { None }
+    fn key_pressed(&mut self, _key: Key) {}
 }
 
 pub type SketchFactory = fn() -> Box<dyn Sketch>;

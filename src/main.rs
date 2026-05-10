@@ -5,7 +5,6 @@ use midi::MidiState;
 use midir::MidiInputConnection;
 use nannou::prelude::*;
 use sketches::{registry, Sketch, SketchFactory};
-use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -34,6 +33,8 @@ struct Model {
     registry: Vec<(&'static str, SketchFactory)>,
     show_hud: bool,
     last_midi_t: Instant,
+    midi_cc_seen: bool,
+    midi_note_seen: bool,
 }
 
 fn model(app: &App) -> Model {
@@ -70,6 +71,8 @@ fn model(app: &App) -> Model {
         registry: reg,
         show_hud: true,
         last_midi_t: Instant::now(),
+        midi_cc_seen: false,
+        midi_note_seen: false,
     }
 }
 
@@ -81,41 +84,36 @@ fn key_pressed(_app: &App, model: &mut Model, key: Key) {
             print_sketch_info(&*model.active);
         }
         Key::H => model.show_hud = !model.show_hud,
-        _ => {}
+        _ => model.active.key_pressed(key),
     }
 }
 
 fn update(_app: &App, model: &mut Model, update: Update) {
     let dt = update.since_last.secs() as f32;
-    let (midi_snapshot, events) = {
+    let midi_snapshot = {
         let mut s = model.midi_state.lock().unwrap();
-        let events: Vec<_> = s.recent_events.drain(..).collect();
-        let recent_events: VecDeque<_> = events.iter().copied().collect();
-        (MidiState { ccs: s.ccs, notes: s.notes, recent_events }, events)
+        let snap = s.clone();
+        s.recent_events.clear();
+        snap
     };
 
-    let changed: Vec<String> = midi_snapshot
-        .ccs
-        .iter()
-        .enumerate()
-        .filter(|&(i, &val)| (val - model.prev_ccs[i]).abs() > f32::EPSILON)
-        .map(|(i, &val)| format!("CC{i}={val:.2}"))
-        .collect();
-    if !changed.is_empty() {
-        println!("MIDI: {}", changed.join(" "));
+    let cc_changed = midi_snapshot.ccs.iter().enumerate()
+        .any(|(i, &val)| (val - model.prev_ccs[i]).abs() > f32::EPSILON);
+    if cc_changed {
         model.last_midi_t = Instant::now();
+        if !model.midi_cc_seen {
+            println!("MIDI knobs: OK");
+            model.midi_cc_seen = true;
+        }
     }
     model.prev_ccs = midi_snapshot.ccs;
 
-    for e in &events {
-        if e.on {
-            println!("Note {} on  vel={:.3}", e.note, e.velocity);
-        } else {
-            println!("Note {} off", e.note);
-        }
-    }
-    if !events.is_empty() {
+    if !midi_snapshot.recent_events.is_empty() {
         model.last_midi_t = Instant::now();
+        if !model.midi_note_seen {
+            println!("MIDI notes: OK");
+            model.midi_note_seen = true;
+        }
     }
 
     model.active.update(&midi_snapshot, dt);

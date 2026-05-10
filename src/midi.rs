@@ -1,14 +1,13 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use midir::{MidiInput, MidiInputConnection};
 
 #[derive(Clone, Copy, Default)]
 pub struct NoteState {
+    #[allow(dead_code)]
     pub velocity: f32,
     pub on: bool,
-    pub last_change: Option<Instant>,
 }
 
 #[derive(Clone, Copy)]
@@ -18,6 +17,7 @@ pub struct NoteEvent {
     pub on: bool,
 }
 
+#[derive(Clone)]
 pub struct MidiState {
     pub ccs: [f32; 128],
     pub notes: [NoteState; 128],
@@ -85,11 +85,7 @@ pub fn start() -> (Arc<Mutex<MidiState>>, Option<MidiInputConnection<()>>) {
                 }
                 0x90 => {
                     let on = b2 > 0;
-                    s.notes[b1] = NoteState {
-                        velocity: b2 as f32 / 127.0,
-                        on,
-                        last_change: Some(Instant::now()),
-                    };
+                    s.notes[b1] = NoteState { velocity: b2 as f32 / 127.0, on };
                     push_event(
                         &mut s.recent_events,
                         NoteEvent { note: b1 as u8, velocity: b2 as f32 / 127.0, on },
@@ -97,7 +93,6 @@ pub fn start() -> (Arc<Mutex<MidiState>>, Option<MidiInputConnection<()>>) {
                 }
                 0x80 => {
                     s.notes[b1].on = false;
-                    s.notes[b1].last_change = Some(Instant::now());
                     push_event(
                         &mut s.recent_events,
                         NoteEvent { note: b1 as u8, velocity: 0.0, on: false },
