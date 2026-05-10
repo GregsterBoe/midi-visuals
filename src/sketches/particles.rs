@@ -4,15 +4,19 @@ use nannou::prelude::*;
 use nannou::rand::{thread_rng, Rng};
 
 const PARAMS: &[Param] = &[
-    Param::new(24, "hue",       0.0,   1.0),
-    Param::new(25, "hue_spread", 0.0,  0.5),
-    Param::new(26, "gravity",   0.0, 500.0),
-    Param::new(27, "drag",      0.0,   4.0),
-    Param::new(28, "spawn",     1.0,  50.0),
+    Param::new(24, "hue",        0.0,   1.0),
+    Param::new(25, "hue_spread", 0.0,   0.5),
+    Param::new(26, "gravity",    0.0, 500.0),
+    Param::new(27, "drag",       0.0,   4.0),
+    Param::new(28, "spawn",      1.0,  50.0),
 ];
+
+const R: f32 = 3.0;
 
 pub struct Particles {
     particles: Vec<Particle>,
+    mesh_verts: Vec<(Vec3, Hsla)>,
+    mesh_idx: Vec<usize>,
 }
 
 struct Particle {
@@ -25,7 +29,11 @@ struct Particle {
 
 impl Particles {
     pub fn new() -> Self {
-        Self { particles: Vec::new() }
+        Self {
+            particles: Vec::new(),
+            mesh_verts: Vec::with_capacity(10_000 * 4),
+            mesh_idx: Vec::with_capacity(10_000 * 6),
+        }
     }
 
     fn spawn(&mut self, count: usize, base_hue: f32, hue_spread: f32) {
@@ -46,6 +54,27 @@ impl Particles {
                 max_lifetime: lifetime,
                 hue,
             });
+        }
+    }
+
+    fn build_mesh(&mut self) {
+        self.mesh_verts.clear();
+        self.mesh_idx.clear();
+        for p in &self.particles {
+            let alpha = (p.lifetime / p.max_lifetime).powi(2);
+            let color = hsla(p.hue, 0.9, 0.6, alpha);
+            let base = self.mesh_verts.len();
+            let (x, y) = (p.pos.x, p.pos.y);
+            self.mesh_verts.extend_from_slice(&[
+                (vec3(x - R, y - R, 0.0), color),
+                (vec3(x + R, y - R, 0.0), color),
+                (vec3(x + R, y + R, 0.0), color),
+                (vec3(x - R, y + R, 0.0), color),
+            ]);
+            self.mesh_idx.extend_from_slice(&[
+                base, base + 1, base + 2,
+                base, base + 2, base + 3,
+            ]);
         }
     }
 }
@@ -72,16 +101,18 @@ impl Sketch for Particles {
                 self.spawn(spawn_count.min(remaining), base_hue, hue_spread);
             }
         }
+
+        self.build_mesh();
     }
 
     fn view(&self, draw: &Draw, _win: Rect) {
-        for p in &self.particles {
-            let alpha = (p.lifetime / p.max_lifetime).powi(2);
-            draw.ellipse()
-                .xy(p.pos)
-                .radius(3.0_f32)
-                .color(hsla(p.hue, 0.9, 0.6, alpha));
+        if self.mesh_verts.is_empty() {
+            return;
         }
+        draw.mesh().indexed_colored(
+            self.mesh_verts.iter().copied(),
+            self.mesh_idx.iter().copied(),
+        );
     }
 
     fn name(&self) -> &'static str { "particles" }
