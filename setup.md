@@ -145,31 +145,46 @@ cargo run
 
 ---
 
-## Planned Architecture
+## MIDI Device
+
+Currently using **Akai MPK mini IV**. Knob CC assignments depend on the active preset —
+**always use Preset 1** (the default). Switching presets changes the CC numbers and
+breaks the sketch param mappings.
+
+Sketches use CC 24–28 by convention. If a new sketch needs different knobs, define
+its `PARAMS` to match the preset 1 CC numbers for those physical knobs.
+
+---
+
+## Architecture
 
 ```
 midi-visuals/
   src/
-    main.rs          ← launcher / sketch switcher
+    main.rs          ← launcher, sketch switcher (Tab), HUD (H)
     midi.rs          ← shared MIDI input layer (midir)
     sketches/
-      mod.rs
-      aurora.rs      ← visualization 1
-      grid.rs        ← visualization 2
-      particles.rs   ← visualization 3
+      mod.rs         ← Sketch trait, Param struct, registry
+      aurora.rs      ← MIDI-reactive circle
+      grid.rs        ← 8×8 note grid
+      particles.rs   ← particle system
 ```
 
-Each sketch exposes a common interface:
+Each sketch implements the `Sketch` trait:
 
 ```rust
 pub trait Sketch {
-    fn update(&mut self, midi: &MidiState);
-    fn view(&self, app: &App, frame: Frame);
+    fn update(&mut self, midi: &MidiState, dt: f32);
+    fn view(&self, draw: &Draw, win: Rect);
+    fn name(&self) -> &'static str;
+    fn params(&self) -> &[Param] { &[] }          // CC knob declarations
+    fn hud_info(&self) -> Option<String> { None }  // extra HUD line
+    fn key_pressed(&mut self, key: Key) {}         // sketch-local keys
 }
 ```
 
-MIDI state is processed once and passed to whichever sketch is currently active.
-Switching between sketches is handled in `main.rs` via a keyboard event.
+CC knobs are declared once per sketch as a `const PARAMS` array and read via
+`PARAMS[i].read(midi)`. The HUD shows live values automatically.
 
 ---
 
