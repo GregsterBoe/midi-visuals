@@ -217,5 +217,75 @@ vertices remain at `z = 0.0`. Nannou sorts draw primitives by z-value, so trail
 always sorts before drops — deterministic without merging into one mesh. (The previous
 combined-mesh approach was needed only because both calls used the same z = 0.0.)
 
+**Pass 3 — instanced rendering via raw wgpu pipeline** *(replaces Nannou draw API entirely)*
+
+**Motivation:** Pass 1–2 still build geometry on the CPU and hand it to Nannou's draw
+system, which re-tessellates and submits N primitives. With instanced rendering the GPU
+replicates a single template quad for every instance, eliminating both the CPU mesh-build
+and Nannou's internal batching overhead.
+
+**What was done:**
+
+- Replaced `draw.mesh().indexed_colored()` with a hand-written wgpu render pipeline.
+  Nannou's `Sketch::view()` becomes a no-op; rendering moves to a new `Sketch::raw_render()`
+  method called from `main.rs` after `draw.to_frame()`.
+
+- **Template quad**: 4 vertices at `(-1,1)²`, indices `[0,1,2, 0,2,3]` — uploaded once,
+  never changes.
+
+- **Instance buffer**: one 40-byte record per visible quad, uploaded via
+  `queue.write_buffer()` each frame:
+
+  ```
+  offset  0 — center:  [f32; 2]   world-space center
+  offset  8 — axes:    [f32; 4]   [right.xy, up.xy] — encodes orientation + half-extents
+  offset 24 — color:   [f32; 4]   linear RGBA
+  ```
+
+  For an **axis-aligned square** of half-size `h`: `right=(h,0)`, `up=(0,h)`.
+  For an **oriented tail quad**: `right=half_dir` (half the frame displacement),
+  `up=perp*0.5` (perpendicular half-width). The same pipeline handles both — only
+  the instance data differs.
+
+- **Vertex shader (WGSL)**:
+  ```wgsl
+  let world = center + local.x * axes.xy + local.y * axes.zw;
+  let ndc   = world / (globals.win_size * 0.5);
+  ```
+  One uniform buffer holds the window size; no MVP matrices needed for 2D.
+
+- **Two `draw_indexed(0..6, 0, range)` calls** per frame: trail instance range first,
+  drop instance range second — painter's algorithm with no z values.
+
+- **Lazy init with auto-resize**: `DropletWgpu` is stored as
+  `RefCell<Option<DropletWgpu>>` so it can be created on the first `raw_render()` call
+  (when a `&wgpu::Device` is available) and recreated at double capacity if the instance
+  count ever exceeds the buffer. This pattern keeps wgpu resources self-contained inside
+  the sketch with no changes to the `model()` startup flow.
+
+**Nannou-specific gotchas (don't guess, these cost time):**
+
+- `Frame::TEXTURE_FORMAT` is `Rgba16Float` — Nannou renders to an intermediary linear
+  HDR texture, not directly to the swap chain. The pipeline's `fragment.targets[0].format`
+  must match this, not `Bgra8UnormSrgb`.
+- `Frame::DEFAULT_MSAA_SAMPLES` is `4`. The window uses 4× MSAA by default. The pipeline
+  `multisample.count` must equal `4` or the render pass panics on a sample-count mismatch.
+  Nannou resolves the MSAA texture to non-MSAA after `view()` returns, so our render pass
+  targets the 4× MSAA texture and sets `resolve_target: None` (Nannou handles the resolve).
+- `frame.texture_view()` returns `&nannou::wgpu::TextureView`, a wrapper that
+  `Deref`s to `wgpu::TextureViewHandle` (the raw wgpu type). The render pass descriptor
+  needs the raw handle: pass `&**frame.texture_view()` from `main.rs`.
+- `LoadOp::Load` is required — our pass draws on top of what Nannou's draw already wrote
+  (background + HUD). `LoadOp::Clear` would wipe it.
+- `device.create_buffer_init()` requires the `DeviceExt` trait; it is available via
+  `use nannou::prelude::*` (`nannou` re-exports `wgpu::util::DeviceExt`).
+- `bytemuck::cast_slice::<f32, u8>(&vec)` is the correct way to convert a `Vec<f32>`
+  instance buffer to bytes for `queue.write_buffer()`. Add `bytemuck = "1"` to
+  `Cargo.toml` (it is already a transitive dependency so no download is needed).
+
+**Remaining ceiling:** the CPU still iterates all cells and droplets each frame to
+populate the instance `Vec<f32>`. At very high counts (100k+ instances), this loop
+becomes the bottleneck — the trigger for a compute-shader physics pass.
+
 *Add a new section under "Per-Sketch" for each sketch that receives a
 non-trivial optimization pass.*

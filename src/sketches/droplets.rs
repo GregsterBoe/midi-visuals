@@ -1,13 +1,12 @@
 use crate::midi::MidiState;
 use crate::sketches::{Param, Sketch};
-use nannou::color::LinSrgba;
 use nannou::prelude::*;
 use nannou::rand::{thread_rng, Rng};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 // ── simulation ────────────────────────────────────────────────────────────────
 const CELL_SIZE: f32 = 8.0;
-const MAX_DROPLETS: usize = 400;
+const MAX_DROPLETS: usize = 5000;
 const SPAWN_MARGIN: f32 = 10.0;
 const CLAMP_PAD: f32 = 4.0;
 
@@ -30,22 +29,72 @@ const INFLUENCE_THRESHOLD: f32 = 0.05;
 const INFLUENCE_RENDER_GAIN: f32 = 0.25; // intensity → alpha
 const INFLUENCE_RENDER_MAX: f32 = 95.0 / 255.0;
 
-// Trail geometry is rebuilt every N frames. Droplet geometry rebuilds every frame.
-// At 60 fps this yields ~20 trail rebuilds/s; the trail changes slowly enough
-// that the 3-frame lag is invisible.
+// Trail geometry is rebuilt every N frames. Drop geometry rebuilds every frame.
 const TRAIL_REBUILD_INTERVAL: u8 = 3;
+
+// ── instanced rendering ───────────────────────────────────────────────────────
+// Each instance is 10 f32s: center(2) + axes(4) + color(4).
+// axes = [right.x, right.y, up.x, up.y] — encodes orientation and half-extents.
+// For axis-aligned quads:   right=(hs,0), up=(0,hs)
+// For oriented tail quads:  right=half_dir, up=perp*half_width
+const INSTANCE_FLOATS: usize = 10;
+const INSTANCE_STRIDE: u64 = (INSTANCE_FLOATS * 4) as u64; // bytes
+
+// WGSL shader — one pipeline handles all quad types via the axes transform.
+const SHADER: &str = r#"
+struct Globals {
+    win_size: vec2<f32>,
+    _pad: vec2<f32>,
+}
+@group(0) @binding(0) var<uniform> globals: Globals;
+
+struct VertOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) color: vec4<f32>,
+}
+
+@vertex
+fn vs_main(
+    @location(0) local: vec2<f32>,
+    @location(1) center: vec2<f32>,
+    @location(2) axes: vec4<f32>,
+    @location(3) color: vec4<f32>,
+) -> VertOut {
+    let world = center + local.x * axes.xy + local.y * axes.zw;
+    let ndc = world / (globals.win_size * 0.5);
+    var out: VertOut;
+    out.clip_pos = vec4<f32>(ndc.x, ndc.y, 0.0, 1.0);
+    out.color = color;
+    return out;
+}
+
+@fragment
+fn fs_main(@location(0) color: vec4<f32>) -> @location(0) vec4<f32> {
+    return color;
+}
+"#;
+
+struct DropletWgpu {
+    pipeline: wgpu::RenderPipeline,
+    quad_vbuf: wgpu::Buffer,
+    quad_ibuf: wgpu::Buffer,
+    instance_buf: wgpu::Buffer,
+    globals_buf: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    instance_capacity: usize,
+}
 
 // ── MIDI params ───────────────────────────────────────────────────────────────
 const PARAMS: &[Param] = &[
     Param::new(24, "base hue",   0.0,  360.0),
-    Param::new(25, "spawn rate", 0.0, 300.0),
+    Param::new(25, "spawn rate", 0.0,  300.0),
     Param::new(26, "attraction", 0.0,  3.0),
     Param::new(27, "jitter",     0.0,  120.0),
     Param::new(28, "decay",      0.05, 2.0),
 ];
 
 // ── color ─────────────────────────────────────────────────────────────────────
-const BASE_HUE: f32 = 210.0;   // degrees — also used as default before MIDI connects
+const BASE_HUE: f32 = 210.0;
 const BASE_SAT: f32 = 0.75;
 const BASE_LIGHT: f32 = 0.55;
 const MIN_LUMA_SPAWN: f32 = 0.32;
@@ -77,14 +126,10 @@ pub struct Droplets {
     base_hue: f32,
     win: Cell<Rect>,
     deposits: Vec<(Vec2, f32, [f32; 3])>,
-    // Trail mesh rebuilt every TRAIL_REBUILD_INTERVAL frames (slow-changing geometry).
-    // Vertices are at z=-1 so a separate draw call always sorts behind the drop mesh.
-    trail_verts: Vec<(Vec3, LinSrgba<f32>)>,
-    trail_idx: Vec<usize>,
+    trail_instances: Vec<f32>,   // 10 floats per quad instance, rebuilt every TRAIL_REBUILD_INTERVAL frames
+    drop_instances: Vec<f32>,    // 10 floats per quad instance, rebuilt every frame
     trail_frame: u8,
-    // Drop mesh rebuilt every frame (fast-moving geometry).
-    drop_verts: Vec<(Vec3, LinSrgba<f32>)>,
-    drop_idx: Vec<usize>,
+    wgpu: RefCell<Option<DropletWgpu>>,
 }
 
 // ── impl ──────────────────────────────────────────────────────────────────────
@@ -95,7 +140,6 @@ impl Droplets {
         let cols = (win_w / CELL_SIZE).ceil() as usize;
         let rows = (win_h / CELL_SIZE).ceil() as usize;
         let max_cells = cols * rows;
-        let drop_cap = MAX_DROPLETS * 2; // tail + head quads per droplet
         Self {
             droplets: Vec::new(),
             influence: vec![0.0; max_cells],
@@ -106,11 +150,137 @@ impl Droplets {
             base_hue: BASE_HUE,
             win: Cell::new(Rect::from_w_h(win_w, win_h)),
             deposits: Vec::new(),
-            trail_verts: Vec::with_capacity(max_cells * 4),
-            trail_idx: Vec::with_capacity(max_cells * 6),
+            trail_instances: Vec::with_capacity(max_cells * INSTANCE_FLOATS),
+            drop_instances: Vec::with_capacity(MAX_DROPLETS * 2 * INSTANCE_FLOATS),
             trail_frame: 0,
-            drop_verts: Vec::with_capacity(drop_cap * 4),
-            drop_idx: Vec::with_capacity(drop_cap * 6),
+            wgpu: RefCell::new(None),
+        }
+    }
+
+    fn create_wgpu(device: &wgpu::Device, capacity: usize) -> DropletWgpu {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("droplets"),
+            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        });
+
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("droplets_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("droplets_globals"),
+            size: 16, // 4 × f32
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("droplets_bg"),
+            layout: &bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: globals_buf.as_entire_binding(),
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("droplets_pl"),
+            bind_group_layouts: &[&bgl],
+            push_constant_ranges: &[],
+        });
+
+        // Template unit quad: vertices in [-1,1]², indices form two triangles
+        let quad_verts: [f32; 8] = [-1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0];
+        let quad_vbuf = device.create_buffer_init(&wgpu::BufferInitDescriptor {
+            label: Some("droplets_qv"),
+            contents: bytemuck::cast_slice(&quad_verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let quad_idx: [u16; 6] = [0, 1, 2, 0, 2, 3];
+        let quad_ibuf = device.create_buffer_init(&wgpu::BufferInitDescriptor {
+            label: Some("droplets_qi"),
+            contents: bytemuck::cast_slice(&quad_idx),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("droplets_inst"),
+            size: (capacity * INSTANCE_FLOATS * 4) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("droplets"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[
+                    // Slot 0: per-vertex — the unit quad template
+                    wgpu::VertexBufferLayout {
+                        array_stride: 8,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 0,
+                            shader_location: 0,
+                        }],
+                    },
+                    // Slot 1: per-instance — center, axes, color
+                    wgpu::VertexBufferLayout {
+                        array_stride: INSTANCE_STRIDE,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &[
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0,  shader_location: 1 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 8,  shader_location: 2 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 24, shader_location: 3 },
+                        ],
+                    },
+                ],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: Frame::TEXTURE_FORMAT,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            // Must match Nannou's default 4x MSAA intermediary texture
+            multisample: wgpu::MultisampleState {
+                count: Frame::DEFAULT_MSAA_SAMPLES,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+
+        DropletWgpu {
+            pipeline,
+            quad_vbuf,
+            quad_ibuf,
+            instance_buf,
+            globals_buf,
+            bind_group,
+            instance_capacity: capacity,
         }
     }
 
@@ -170,7 +340,7 @@ impl Droplets {
         if tl < 0.08 { return base; }
 
         let t = ((tl - 0.08) / 0.32).clamp(0.0, 1.0);
-        let mix = 0.80 - 0.52 * t; // 0.80 at low luma, 0.28 at high
+        let mix = 0.80 - 0.52 * t;
         let mixed = [
             trail[0] * (1.0 - mix) + base[0] * mix,
             trail[1] * (1.0 - mix) + base[1] * mix,
@@ -200,13 +370,10 @@ impl Droplets {
         });
     }
 
-    // Rebuilds trail geometry. Called every TRAIL_REBUILD_INTERVAL frames.
-    // Trail vertices are placed at z=-1 so a separate draw call sorts behind drop_verts.
-    fn build_trail_mesh(&mut self) {
+    // Rebuilds trail instance data. Called every TRAIL_REBUILD_INTERVAL frames.
+    fn build_trail_instances(&mut self) {
         let win = self.win.get();
-        self.trail_verts.clear();
-        self.trail_idx.clear();
-
+        self.trail_instances.clear();
         for gy in 0..self.rows {
             for gx in 0..self.cols {
                 let i = gy * self.cols + gx;
@@ -217,66 +384,39 @@ impl Droplets {
                 let x = win.left() + (gx as f32 + 0.5) * CELL_SIZE;
                 let y = win.top()  - (gy as f32 + 0.5) * CELL_SIZE;
                 let h = CELL_SIZE * 0.5;
-                let c = LinSrgba::new(r, g, b, alpha);
-                let base = self.trail_verts.len();
-                self.trail_verts.extend_from_slice(&[
-                    (vec3(x - h, y - h, -1.0), c),
-                    (vec3(x + h, y - h, -1.0), c),
-                    (vec3(x + h, y + h, -1.0), c),
-                    (vec3(x - h, y + h, -1.0), c),
-                ]);
-                self.trail_idx.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
+                // Axis-aligned quad: right=(h,0), up=(0,h)
+                self.trail_instances.extend_from_slice(&[x, y, h, 0.0, 0.0, h, r, g, b, alpha]);
             }
         }
     }
 
-    // Rebuilds droplet geometry (tails + heads). Called every frame.
-    fn build_drop_mesh(&mut self) {
-        self.drop_verts.clear();
-        self.drop_idx.clear();
-
+    // Rebuilds drop instance data (tails + heads). Called every frame.
+    fn build_drop_instances(&mut self) {
+        self.drop_instances.clear();
         for d in &self.droplets {
             let fade = (1.0 - d.age / d.max_age).clamp(0.0, 1.0);
             let [r, g, b] = d.color;
             let a = d.alpha * fade;
 
-            // Tail: thin quad along the movement direction
+            // Tail: oriented quad spanning prev_pos → pos
             let dir = d.pos - d.prev_pos;
             if dir.length_squared() > 0.001 {
+                let half_dir = dir * 0.5;
                 let perp = vec2(-dir.y, dir.x).normalize() * 0.5;
-                let c = LinSrgba::new(r, g, b, a);
-                let p0 = d.prev_pos - perp;
-                let p1 = d.prev_pos + perp;
-                let p2 = d.pos + perp;
-                let p3 = d.pos - perp;
-                let base = self.drop_verts.len();
-                self.drop_verts.extend_from_slice(&[
-                    (vec3(p0.x, p0.y, 0.0), c),
-                    (vec3(p1.x, p1.y, 0.0), c),
-                    (vec3(p2.x, p2.y, 0.0), c),
-                    (vec3(p3.x, p3.y, 0.0), c),
+                let cx = (d.pos.x + d.prev_pos.x) * 0.5;
+                let cy = (d.pos.y + d.prev_pos.y) * 0.5;
+                self.drop_instances.extend_from_slice(&[
+                    cx, cy, half_dir.x, half_dir.y, perp.x, perp.y, r, g, b, a,
                 ]);
-                self.drop_idx.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
             }
 
-            // Head: bright quad
+            // Head: bright axis-aligned quad
             let hr = d.radius;
-            let ch = LinSrgba::new(
-                (r + 0.10).min(1.0),
-                (g + 0.10).min(1.0),
-                (b + 0.10).min(1.0),
-                (a + 0.10).min(1.0),
-            );
-            let x = d.pos.x;
-            let y = d.pos.y;
-            let base = self.drop_verts.len();
-            self.drop_verts.extend_from_slice(&[
-                (vec3(x - hr, y - hr, 0.0), ch),
-                (vec3(x + hr, y - hr, 0.0), ch),
-                (vec3(x + hr, y + hr, 0.0), ch),
-                (vec3(x - hr, y + hr, 0.0), ch),
+            let (rh, gh, bh) = ((r + 0.10).min(1.0), (g + 0.10).min(1.0), (b + 0.10).min(1.0));
+            let ah = (a + 0.10).min(1.0);
+            self.drop_instances.extend_from_slice(&[
+                d.pos.x, d.pos.y, hr, 0.0, 0.0, hr, rh, gh, bh, ah,
             ]);
-            self.drop_idx.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
         }
     }
 }
@@ -286,15 +426,12 @@ impl Sketch for Droplets {
         let mut rng = thread_rng();
         let win = self.win.get();
 
-        // Read MIDI params (CC at 0 → min, CC at 127 → max)
         self.base_hue    = PARAMS[0].read(midi);
         let spawn_rate   = PARAMS[1].read(midi);
         let attraction   = PARAMS[2].read(midi);
         let jitter_range = PARAMS[3].read(midi);
         let decay_rate   = PARAMS[4].read(midi);
 
-        // Rebuild grid when the window is resized.
-        // view() updates self.win each frame, so update() sees the new size one frame later.
         let new_cols = (win.w() / CELL_SIZE).ceil() as usize;
         let new_rows = (win.h() / CELL_SIZE).ceil() as usize;
         if new_cols != self.cols || new_rows != self.rows {
@@ -304,15 +441,12 @@ impl Sketch for Droplets {
             self.trail_rgb = vec![[0.0; 3]; new_cols * new_rows];
             self.droplets.clear();
             self.spawn_accum = 0.0;
-            self.trail_frame = 0; // force trail rebuild on next frame
+            self.trail_frame = 0;
         }
 
-        // Decay the influence field
         let decay = (1.0 - decay_rate * dt).max(0.0);
         for v in &mut self.influence { *v *= decay; }
 
-        // Physics pass — reads influence immutably, collects deposits separately
-        // so we can apply them after without conflicting borrows.
         let mut deposits = std::mem::take(&mut self.deposits);
         deposits.clear();
         {
@@ -356,7 +490,6 @@ impl Sketch for Droplets {
             }
         }
 
-        // Apply deposits (influence borrow released)
         for (pos, amount, color) in deposits.drain(..) {
             self.deposit(pos, amount, color);
         }
@@ -364,15 +497,14 @@ impl Sketch for Droplets {
 
         self.droplets.retain(|d| d.alive);
 
-        // Note-on burst: spawn 4–8 droplets anchored to the note's Y position.
-        // Velocity scales alpha and radius so harder hits produce brighter, larger drops.
+        // Note-on burst: high notes → top, low notes → bottom.
+        // Velocity scales radius, alpha, and trail deposit amount.
         for event in midi.note_on_events() {
             let remaining = MAX_DROPLETS.saturating_sub(self.droplets.len());
             if remaining == 0 { break; }
             let note_y = win.bottom() + (event.note as f32 / 127.0) * win.h();
             let count = rng.gen_range(4..=8_usize).min(remaining);
             let velocity = event.velocity;
-            // deposit_scale: soft hits leave a thin trace; hard hits leave 2× the trail
             let deposit_scale = (0.5 + 1.5 * velocity).clamp(0.5, 2.0);
             for _ in 0..count {
                 let y = (note_y + rng.gen_range(-20.0f32..20.0f32))
@@ -394,37 +526,85 @@ impl Sketch for Droplets {
             }
         }
 
-        // Continuous spawn from right edge
         self.spawn_accum += spawn_rate * dt;
         while self.spawn_accum >= 1.0 && self.droplets.len() < MAX_DROPLETS {
             self.spawn_accum -= 1.0;
             self.spawn_one(&mut rng, win, jitter_range);
         }
 
-        // Rebuild drop geometry every frame; trail only every TRAIL_REBUILD_INTERVAL frames.
         if self.trail_frame == 0 {
-            self.build_trail_mesh();
+            self.build_trail_instances();
         }
         self.trail_frame = (self.trail_frame + 1) % TRAIL_REBUILD_INTERVAL;
-        self.build_drop_mesh();
+        self.build_drop_instances();
     }
 
-    fn view(&self, draw: &Draw, win: Rect) {
+    // view() only captures the window rect so update() sees the current size next frame.
+    // All rendering is done in raw_render() via the instanced wgpu pipeline.
+    fn view(&self, _draw: &Draw, win: Rect) {
         self.win.set(win);
+    }
 
-        // Trail is at z=-1, drops at z=0 — separate draw calls are safe because
-        // the z difference gives Nannou a deterministic sort order.
-        if !self.trail_verts.is_empty() {
-            draw.mesh().indexed_colored(
-                self.trail_verts.iter().copied(),
-                self.trail_idx.iter().copied(),
-            );
+    fn raw_render(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureViewHandle,
+        win: Rect,
+    ) {
+        let trail_count = (self.trail_instances.len() / INSTANCE_FLOATS) as u32;
+        let drop_count  = (self.drop_instances.len()  / INSTANCE_FLOATS) as u32;
+        let total = (trail_count + drop_count) as usize;
+        if total == 0 { return; }
+
+        // Lazy init or grow the instance buffer when capacity is exceeded
+        let needs_reinit = {
+            let b = self.wgpu.borrow();
+            b.as_ref().map_or(true, |g| g.instance_capacity < total)
+        };
+        if needs_reinit {
+            let capacity = (total * 2).max(8300);
+            *self.wgpu.borrow_mut() = Some(Self::create_wgpu(device, capacity));
         }
-        if !self.drop_verts.is_empty() {
-            draw.mesh().indexed_colored(
-                self.drop_verts.iter().copied(),
-                self.drop_idx.iter().copied(),
-            );
+
+        let wgpu_borrow = self.wgpu.borrow();
+        let gpu = wgpu_borrow.as_ref().unwrap();
+
+        // Update window size uniform
+        let globals: [f32; 4] = [win.w(), win.h(), 0.0, 0.0];
+        queue.write_buffer(&gpu.globals_buf, 0, bytemuck::cast_slice(&globals));
+
+        // Upload trail instances followed by drop instances into one contiguous buffer.
+        // Trail is drawn first (background), drops second (foreground).
+        let mut all: Vec<f32> = Vec::with_capacity(
+            self.trail_instances.len() + self.drop_instances.len()
+        );
+        all.extend_from_slice(&self.trail_instances);
+        all.extend_from_slice(&self.drop_instances);
+        queue.write_buffer(&gpu.instance_buf, 0, bytemuck::cast_slice(&all));
+
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("droplets"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: true },
+            })],
+            depth_stencil_attachment: None,
+        });
+
+        rpass.set_pipeline(&gpu.pipeline);
+        rpass.set_bind_group(0, &gpu.bind_group, &[]);
+        rpass.set_vertex_buffer(0, gpu.quad_vbuf.slice(..));
+        rpass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
+        rpass.set_index_buffer(gpu.quad_ibuf.slice(..), wgpu::IndexFormat::Uint16);
+
+        if trail_count > 0 {
+            rpass.draw_indexed(0..6, 0, 0..trail_count);
+        }
+        if drop_count > 0 {
+            rpass.draw_indexed(0..6, 0, trail_count..trail_count + drop_count);
         }
     }
 

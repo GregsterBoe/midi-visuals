@@ -1174,6 +1174,7 @@ dependencies = [
 name = "midi-visuals"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "midir",
  "nannou",
 ]

@@ -35,6 +35,15 @@ pub trait Sketch {
     fn params(&self) -> &[Param] { &[] }
     fn hud_info(&self) -> Option<String> { None }
     fn key_pressed(&mut self, _key: Key) {}
+    /// Optional raw wgpu render pass called after draw.to_frame(). Default is a no-op.
+    fn raw_render(
+        &self,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        _encoder: &mut wgpu::CommandEncoder,
+        _target: &wgpu::TextureViewHandle,
+        _win: Rect,
+    ) {}
 }
 
 pub type SketchFactory = fn() -> Box<dyn Sketch>;

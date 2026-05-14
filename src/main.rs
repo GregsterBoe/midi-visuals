@@ -169,4 +169,10 @@ fn view(app: &App, model: &Model, frame: Frame) {
     }
 
     draw.to_frame(app, &frame).unwrap();
+
+    // Sketches that implement raw_render() draw here via their own wgpu pipeline.
+    let dqp = frame.device_queue_pair();
+    let mut encoder = frame.command_encoder();
+    let target = frame.texture_view();
+    model.active.raw_render(dqp.device(), dqp.queue(), &mut *encoder, &**target, win);
 }

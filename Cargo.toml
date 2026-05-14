@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 nannou = "0.19"
 midir = "0.9"
+bytemuck = "1"
