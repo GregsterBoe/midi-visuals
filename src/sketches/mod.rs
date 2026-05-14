@@ -2,6 +2,7 @@ pub mod aurora;
 pub mod droplets;
 pub mod grid;
 pub mod particles;
+pub mod rings;
 
 use crate::midi::MidiState;
 use nannou::prelude::*;
@@ -54,5 +55,6 @@ pub fn registry() -> Vec<(&'static str, SketchFactory)> {
         ("droplets",  || Box::new(droplets::Droplets::new())),
         ("grid",      || Box::new(grid::Grid::new())),
         ("particles", || Box::new(particles::Particles::new())),
+        ("rings",     || Box::new(rings::Rings::new())),
     ]
 }
