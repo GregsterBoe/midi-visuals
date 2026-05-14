@@ -151,8 +151,25 @@ Currently using **Akai MPK mini IV**. Knob CC assignments depend on the active p
 **always use Preset 1** (the default). Switching presets changes the CC numbers and
 breaks the sketch param mappings.
 
-Sketches use CC 24–28 by convention. If a new sketch needs different knobs, define
-its `PARAMS` to match the preset 1 CC numbers for those physical knobs.
+Available knobs: **CC 24–31** (8 knobs on Preset 1). Sketches declare the CCs they
+need in their `PARAMS` array. CC 31 is reserved for preset scrolling (see below).
+
+---
+
+## Preset System
+
+Presets save and restore all 128 CC values so you can recall a full parameter state.
+
+| Action | Effect |
+|---|---|
+| `S` | Open the naming prompt in the HUD |
+| Type a name, `Enter` | Save current knob state as a named preset |
+| `Escape` | Cancel naming |
+| CC 31 (last knob) | Scroll through saved presets (HUD shows name + index) |
+| `Enter` (normal mode) | Apply the highlighted preset |
+
+Presets are stored in `presets.txt` next to the binary (project root with `cargo run`).
+Saving a name that already exists overwrites that preset.
 
 ---
 
@@ -161,11 +178,13 @@ its `PARAMS` to match the preset 1 CC numbers for those physical knobs.
 ```
 midi-visuals/
   src/
-    main.rs          ← launcher, sketch switcher (Tab), HUD (H)
+    main.rs          ← launcher, sketch switcher (Tab), HUD (H), preset system (S/Enter)
     midi.rs          ← shared MIDI input layer (midir)
+    presets.rs       ← preset save/load (presets.txt)
     sketches/
       mod.rs         ← Sketch trait, Param struct, registry
-      aurora.rs      ← MIDI-reactive circle
+      aurora.rs      ← MIDI-reactive aurora bands
+      droplets.rs    ← fluid droplet simulation (instanced wgpu rendering)
       grid.rs        ← 8×8 note grid
       particles.rs   ← particle system
 ```

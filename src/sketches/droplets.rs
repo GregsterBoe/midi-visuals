@@ -10,11 +10,11 @@ const MAX_DROPLETS: usize = 5000;
 const SPAWN_MARGIN: f32 = 10.0;
 const CLAMP_PAD: f32 = 4.0;
 
-const DROPLET_SPEED: f32 = 120.0;   // px / s
-const SPEED_VARIATION: f32 = 0.3;   // ± fraction of base speed
+const DROPLET_SPEED: f32 = 100.0;   // px / s base (decay scales this up)
+const DECAY_SPEED_GAIN: f32 = 150.0; // added speed per unit of decay_rate
+const SPEED_VARIATION: f32 = 0.25;  // ± fraction of base speed
 const DROPLET_RADIUS: f32 = 2.0;
 const DROPLET_ALPHA: f32 = 0.78;
-const MAX_DROPLET_AGE: f32 = 6.0;   // seconds
 
 const ENTRY_CENTER_Y: f32 = 0.5;    // 0 = top, 1 = bottom of window
 const ENTRY_SPREAD: f32 = 0.8;      // fraction of window height
@@ -109,10 +109,7 @@ struct Droplet {
     vel_y: f32,
     radius: f32,
     alpha: f32,
-    age: f32,
-    max_age: f32,
     color: [f32; 3],
-    deposit_scale: f32,
     alive: bool,
 }
 
@@ -362,10 +359,7 @@ impl Droplets {
             radius: (DROPLET_RADIUS + rng.gen_range(-0.7f32..0.9f32)).max(0.4),
             alpha: (DROPLET_ALPHA + rng.gen_range(-40.0f32 / 255.0..25.0f32 / 255.0))
                 .clamp(40.0 / 255.0, 1.0),
-            age: 0.0,
-            max_age: (MAX_DROPLET_AGE + rng.gen_range(-2.5f32..3.0f32)).max(1.0),
             color,
-            deposit_scale: 1.0,
             alive: true,
         });
     }
@@ -392,11 +386,13 @@ impl Droplets {
 
     // Rebuilds drop instance data (tails + heads). Called every frame.
     fn build_drop_instances(&mut self) {
+        let win = self.win.get();
         self.drop_instances.clear();
         for d in &self.droplets {
-            let fade = (1.0 - d.age / d.max_age).clamp(0.0, 1.0);
+            // Fade out only in the last 15% of the screen so droplets are bright the whole crossing.
+            let progress = ((d.pos.x - win.left()) / win.w()).clamp(0.0, 1.0);
             let [r, g, b] = d.color;
-            let a = d.alpha * fade;
+            let a = d.alpha * (progress / 0.15).min(1.0);
 
             // Tail: oriented quad spanning prev_pos → pos
             let dir = d.pos - d.prev_pos;
@@ -453,9 +449,10 @@ impl Sketch for Droplets {
             let influence = &self.influence;
             let (cols, rows) = (self.cols, self.rows);
 
+            let base_speed = DROPLET_SPEED + decay_rate * DECAY_SPEED_GAIN;
+
             for d in &mut self.droplets {
                 d.prev_pos = d.pos;
-                d.age += dt;
 
                 let probe_x = d.pos.x - PATH_PROBE_AHEAD;
                 let c  = cell_sample(influence, cols, rows, win, vec2(probe_x, d.pos.y));
@@ -475,16 +472,16 @@ impl Sketch for Droplets {
                 let jitter = rng.gen_range(-1.0f32..1.0) * jitter_range;
                 d.vel_y += (target_vy + jitter - d.vel_y) * 0.12;
 
-                let speed = (DROPLET_SPEED
+                let speed = (base_speed
                     * (1.0 + rng.gen_range(-SPEED_VARIATION..SPEED_VARIATION)))
                     .max(10.0);
                 d.pos.x -= speed * dt;
                 d.pos.y = (d.pos.y + d.vel_y * dt)
                     .clamp(win.bottom() + CLAMP_PAD, win.top() - CLAMP_PAD);
 
-                deposits.push((d.pos, INFLUENCE_DEPOSIT * dt * 60.0 * d.deposit_scale, d.color));
+                deposits.push((d.pos, INFLUENCE_DEPOSIT * dt * 60.0, d.color));
 
-                if d.pos.x < win.left() - SPAWN_MARGIN || d.age >= d.max_age {
+                if d.pos.x < win.left() - SPAWN_MARGIN {
                     d.alive = false;
                 }
             }
@@ -498,14 +495,13 @@ impl Sketch for Droplets {
         self.droplets.retain(|d| d.alive);
 
         // Note-on burst: high notes → top, low notes → bottom.
-        // Velocity scales radius, alpha, and trail deposit amount.
+        // Velocity scales radius and alpha; all droplets cross the full screen.
         for event in midi.note_on_events() {
             let remaining = MAX_DROPLETS.saturating_sub(self.droplets.len());
             if remaining == 0 { break; }
             let note_y = win.bottom() + (event.note as f32 / 127.0) * win.h();
             let count = rng.gen_range(4..=8_usize).min(remaining);
             let velocity = event.velocity;
-            let deposit_scale = (0.5 + 1.5 * velocity).clamp(0.5, 2.0);
             for _ in 0..count {
                 let y = (note_y + rng.gen_range(-20.0f32..20.0f32))
                     .clamp(win.bottom() + CLAMP_PAD, win.top() - CLAMP_PAD);
@@ -517,10 +513,7 @@ impl Sketch for Droplets {
                     vel_y: rng.gen_range(-1.0f32..1.0) * jitter_range * 0.2,
                     radius: (DROPLET_RADIUS * (0.7 + 0.6 * velocity)).max(0.4),
                     alpha: (DROPLET_ALPHA * (0.5 + 0.5 * velocity)).clamp(40.0 / 255.0, 1.0),
-                    age: 0.0,
-                    max_age: (MAX_DROPLET_AGE + rng.gen_range(-2.5f32..3.0f32)).max(1.0),
                     color,
-                    deposit_scale,
                     alive: true,
                 });
             }

@@ -1,12 +1,19 @@
 mod midi;
+mod presets;
 mod sketches;
 
 use midi::MidiState;
 use midir::MidiInputConnection;
 use nannou::prelude::*;
+use presets::PresetStore;
 use sketches::{registry, Sketch, SketchFactory};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+enum PresetMode {
+    Normal,
+    Naming { buf: String, skip: bool },
+}
 
 fn main() {
     nannou::app(model).update(update).run();
@@ -35,6 +42,10 @@ struct Model {
     last_midi_t: Instant,
     midi_cc_seen: bool,
     midi_note_seen: bool,
+    presets: PresetStore,
+    preset_idx: usize,
+    preset_mode: PresetMode,
+    preset_scroll_accum: f32,
 }
 
 fn model(app: &App) -> Model {
@@ -42,6 +53,7 @@ fn model(app: &App) -> Model {
         .size(800, 600)
         .view(view)
         .key_pressed(key_pressed)
+        .received_character(received_character)
         .build()
         .unwrap();
 
@@ -61,6 +73,7 @@ fn model(app: &App) -> Model {
 
     let active = reg[idx].1();
     print_sketch_info(&*active);
+    let presets = PresetStore::load(active.name());
 
     Model {
         midi_state,
@@ -73,17 +86,65 @@ fn model(app: &App) -> Model {
         last_midi_t: Instant::now(),
         midi_cc_seen: false,
         midi_note_seen: false,
+        presets,
+        preset_idx: 0,
+        preset_mode: PresetMode::Normal,
+        preset_scroll_accum: 0.0,
+    }
+}
+
+fn received_character(_app: &App, model: &mut Model, ch: char) {
+    if let PresetMode::Naming { ref mut buf, ref mut skip } = model.preset_mode {
+        if *skip { *skip = false; return; }
+        match ch {
+            '\x08' => { buf.pop(); }
+            c if !c.is_control() => buf.push(c),
+            _ => {}
+        }
     }
 }
 
 fn key_pressed(_app: &App, model: &mut Model, key: Key) {
+    // In naming mode only control keys are handled; characters come via received_character.
+    if matches!(model.preset_mode, PresetMode::Naming { .. }) {
+        match key {
+            Key::Return => {
+                let name = if let PresetMode::Naming { ref buf, .. } = model.preset_mode {
+                    buf.trim().to_string()
+                } else {
+                    String::new()
+                };
+                if !name.is_empty() {
+                    model.presets.add(name, model.prev_ccs);
+                    model.preset_idx = model.presets.list.len().saturating_sub(1);
+                    model.presets.save();
+                }
+                model.preset_mode = PresetMode::Normal;
+            }
+            Key::Escape => model.preset_mode = PresetMode::Normal,
+            _ => {}
+        }
+        return;
+    }
+
     match key {
         Key::Tab => {
             model.sketch_idx = (model.sketch_idx + 1) % model.registry.len();
             model.active = model.registry[model.sketch_idx].1();
             print_sketch_info(&*model.active);
+            model.presets = PresetStore::load(model.active.name());
+            model.preset_idx = 0;
+            model.preset_scroll_accum = 0.0;
         }
         Key::H => model.show_hud = !model.show_hud,
+        Key::S => model.preset_mode = PresetMode::Naming { buf: String::new(), skip: true },
+        Key::Return => {
+            if !model.presets.list.is_empty() {
+                let ccs = model.presets.list[model.preset_idx].ccs;
+                model.midi_state.lock().unwrap().ccs = ccs;
+                model.prev_ccs = ccs;
+            }
+        }
         _ => model.active.key_pressed(key),
     }
 }
@@ -106,6 +167,24 @@ fn update(_app: &App, model: &mut Model, update: Update) {
             model.midi_cc_seen = true;
         }
     }
+
+    // Preset scroll: accumulate CC deltas; one step per 10 MIDI ticks (~1/12 turn).
+    if !model.presets.list.is_empty() {
+        let cur   = midi_snapshot.ccs[presets::SCROLL_CC as usize];
+        let prev  = model.prev_ccs[presets::SCROLL_CC as usize];
+        model.preset_scroll_accum += cur - prev;
+        let step = 10.0 / 127.0;
+        let n = model.presets.list.len();
+        while model.preset_scroll_accum >= step {
+            model.preset_scroll_accum -= step;
+            model.preset_idx = (model.preset_idx + 1) % n;
+        }
+        while model.preset_scroll_accum <= -step {
+            model.preset_scroll_accum += step;
+            model.preset_idx = (model.preset_idx + n - 1) % n;
+        }
+    }
+
     model.prev_ccs = midi_snapshot.ccs;
 
     if !midi_snapshot.recent_events.is_empty() {
@@ -166,6 +245,36 @@ fn view(app: &App, model: &Model, frame: Frame) {
                 .w_h(200.0, 16.0);
             next_y -= 16.0;
         }
+
+        // Preset browser: show the currently highlighted preset.
+        if !model.presets.list.is_empty() {
+            let n = model.presets.list.len();
+            let name = &model.presets.list[model.preset_idx].name;
+            draw.text(&format!("> {} ({}/{})", name, model.preset_idx + 1, n))
+                .color(YELLOW)
+                .font_size(12)
+                .x_y(hud_x + 95.0, next_y)
+                .w_h(200.0, 16.0);
+            next_y -= 16.0;
+        }
+
+        // Naming prompt (shown at bottom of HUD when saving).
+        if let PresetMode::Naming { ref buf, .. } = model.preset_mode {
+            draw.text(&format!("Save as: {}_", buf))
+                .color(CYAN)
+                .font_size(12)
+                .x_y(hud_x + 95.0, next_y)
+                .w_h(200.0, 16.0);
+        }
+    } else if let PresetMode::Naming { ref buf, .. } = model.preset_mode {
+        // Show naming prompt even when the HUD is hidden.
+        let hud_x = win.left() + 10.0;
+        let hud_y = win.top() - 14.0;
+        draw.text(&format!("Save as: {}_", buf))
+            .color(CYAN)
+            .font_size(14)
+            .x_y(hud_x + 95.0, hud_y)
+            .w_h(200.0, 20.0);
     }
 
     draw.to_frame(app, &frame).unwrap();
