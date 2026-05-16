@@ -22,6 +22,7 @@ pub struct MidiState {
     pub ccs: [f32; 128],
     pub notes: [NoteState; 128],
     pub recent_events: VecDeque<NoteEvent>,
+    pub pitch_bend: f32,
 }
 
 impl Default for MidiState {
@@ -30,6 +31,7 @@ impl Default for MidiState {
             ccs: [0.0; 128],
             notes: [NoteState::default(); 128],
             recent_events: VecDeque::with_capacity(64),
+            pitch_bend: 0.5,
         }
     }
 }
@@ -82,6 +84,11 @@ pub fn start() -> (Arc<Mutex<MidiState>>, Option<MidiInputConnection<()>>) {
             match status & 0xF0 {
                 0xB0 => {
                     s.ccs[b1] = b2 as f32 / 127.0;
+                }
+                0xE0 => {
+                    // 14-bit pitch bend: message[1]=LSB, message[2]=MSB, range 0-16383
+                    let raw = ((b2 as u16) << 7) | (b1 as u16);
+                    s.pitch_bend = raw as f32 / 16383.0;
                 }
                 0x90 => {
                     let on = b2 > 0;
