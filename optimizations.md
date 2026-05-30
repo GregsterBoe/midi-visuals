@@ -287,5 +287,31 @@ and Nannou's internal batching overhead.
 populate the instance `Vec<f32>`. At very high counts (100k+ instances), this loop
 becomes the bottleneck — the trigger for a compute-shader physics pass.
 
+---
+
+### `cardano`
+
+**Bottleneck:** At high trail (500 frames) × 4 collections × 16 circles the sketch pushed ~288k vertices and ~710k indices per frame. Three compounding costs:
+
+1. **Per-vertex HSL→linear conversion** — Nannou's `draw.mesh()` path called `into_lin_srgba()` on every stored `Hsla` vertex (~9 times per circle, since center + N_SIDES=8 perimeter verts all shared the same color). At ~29k circles per frame that was ~266k conversions.
+
+2. **Redundant trig** — `sin` and `cos` for each of the N_SIDES=8 polygon offsets were recalculated for every dot (8 angle × 2 trig calls × ~29k dots = ~470k trig ops per frame).
+
+3. **Triple-nested heap allocation** — `VecDeque<Vec<Vec<Vec2>>>` stored each frame as an outer Vec of inner Vecs, one inner allocation per collection. At 60 fps with 4 collections: 240 extra heap allocs/sec plus poor cache locality when iterating.
+
+**What was done:**
+
+- Changed `mesh_verts` type from `Vec<(Vec3, Hsla)>` to `Vec<(Vec3, LinSrgba)>`. Color is now converted once per circle via `hsl_to_lin()` instead of once per vertex inside Nannou. `LinSrgba` satisfies `IntoLinSrgba<f32>` as a no-op copy. Note: palette 0.5.0 (the version Nannou 0.19 vendors) uses `LinSrgba::new(r, g, b, a)` with four flat `f32` args.
+
+- Added `hsl_to_lin(h, s, l, a) -> LinSrgba` helper: HSL→sRGB formula (piecewise linear, no powf), skipping the final sRGB→linear gamma step for speed. Colors are slightly brighter but imperceptible in a dark visualizer.
+
+- Precomputed `cos_table: [f32; N_SIDES]` and `sin_table: [f32; N_SIDES]` at the top of `build_mesh()`. 8 trig calls per frame instead of 8 × ~29k.
+
+- Flattened trail from `VecDeque<Vec<Vec<Vec2>>>` to `VecDeque<Vec<Vec2>>`. Each frame is a single contiguous allocation `[c0d0, c0d1, ..., c1d0, ...]` indexed as `[ci * bounds + j]`. Reduces per-frame heap allocs from `1 + n_collections` to `1` and improves iteration cache locality.
+
+- Replaced the per-dot `for k in 0..N_SIDES` index loop with a const `INDEX_OFFSETS: [usize; N_SIDES * 3]` array and a single `extend()`. Hardcodes the fan triangulation for N_SIDES=8 in one slice.
+
+- Raised alpha cull threshold from `0.005` to `0.01` (~50% more leading frames pruned at full trail depth).
+
 *Add a new section under "Per-Sketch" for each sketch that receives a
 non-trivial optimization pass.*

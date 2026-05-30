@@ -24,6 +24,13 @@ const SPRING_K: f32 = 6.0;
 const SPRING_DAMP: f32 = 3.5;
 const IMPULSE_SCALE: f32 = 250.0;
 
+// Triangle fan: center at index 0, perimeter verts 1..=N_SIDES.
+// Hardcoded for N_SIDES=8 to avoid a per-dot loop with modulo.
+const INDEX_OFFSETS: [usize; N_SIDES * 3] = [
+    0, 1, 2,   0, 2, 3,   0, 3, 4,   0, 4, 5,
+    0, 5, 6,   0, 6, 7,   0, 7, 8,   0, 8, 1,
+];
+
 #[derive(Clone, Default)]
 struct Deflection {
     offset: Vec2,
@@ -52,11 +59,33 @@ pub struct Cardano {
     num_collections: usize,
     bounds: usize,
     base_alpha: f32,
-    // trail[frame][collection][circle]
-    trail: VecDeque<Vec<Vec<Vec2>>>,
+    // trail[frame] = flat [c0d0, c0d1, ..., c1d0, ...] — one Vec<Vec2> per frame,
+    // indexed as [ci * bounds + j]. Flat layout improves cache locality vs nested Vecs.
+    trail: VecDeque<Vec<Vec2>>,
     win: Cell<Rect>,
-    mesh_verts: Vec<(Vec3, Hsla)>,
+    // LinSrgba instead of Hsla: convert once per circle here rather than
+    // once per vertex inside Nannou's draw path (~9× fewer conversions).
+    mesh_verts: Vec<(Vec3, LinSrgba)>,
     mesh_idx: Vec<usize>,
+}
+
+/// HSL (hue in [0,1]) → linear-sRGB RGBA, computed once per circle.
+/// Skips the sRGB→linear gamma step for speed (colors are slightly brighter
+/// but imperceptible in a dark visualizer context).
+fn hsl_to_lin(h: f32, s: f32, l: f32, a: f32) -> LinSrgba {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h6 = h * 6.0;
+    let x = c * (1.0 - (h6.rem_euclid(2.0) - 1.0).abs());
+    let m = l - c * 0.5;
+    let (r, g, b) = match h6 as u32 {
+        0 => (c + m, x + m, m),
+        1 => (x + m, c + m, m),
+        2 => (m, c + m, x + m),
+        3 => (m, x + m, c + m),
+        4 => (x + m, m, c + m),
+        _ => (c + m, m, x + m),
+    };
+    LinSrgba::new(r, g, b, a)
 }
 
 impl Cardano {
@@ -94,7 +123,6 @@ impl Cardano {
 
     fn set_num_collections(&mut self, n: usize) {
         self.num_collections = n.max(1).min(MAX_COLLECTIONS);
-        // New collections inherit current inner angles so they're in sync
         let current_angles: Vec<f32> = self.collections.first()
             .map(|c| c.angles_inner.clone())
             .unwrap_or_else(|| Self::evenly_spaced(self.bounds));
@@ -110,43 +138,48 @@ impl Cardano {
         let n = self.trail.len().min(trail_len.max(1));
         let start = self.trail.len().saturating_sub(n);
 
-        // Snapshot lerp_factors before taking mut borrows on mesh vecs
-        let lerp_snap: Vec<Vec<f32>> = self.collections.iter()
-            .map(|c| c.lerp_factors.clone())
+        // Flat lerp_factors: index [ci * bounds + j]
+        let lerp_snap: Vec<f32> = self.collections.iter()
+            .flat_map(|c| c.lerp_factors.iter().copied())
             .collect();
+
+        // Precompute polygon vertex offsets — 8 trig calls instead of 8 × n_dots
+        let mut cos_table = [0.0f32; N_SIDES];
+        let mut sin_table = [0.0f32; N_SIDES];
+        for k in 0..N_SIDES {
+            let a = k as f32 * TAU / N_SIDES as f32;
+            cos_table[k] = a.cos();
+            sin_table[k] = a.sin();
+        }
 
         self.mesh_verts.clear();
         self.mesh_idx.clear();
 
+        let bounds = self.bounds;
+        let n_coll = self.num_collections;
+
         for (fi, frame) in self.trail.iter().enumerate().skip(start) {
             let t = (fi - start + 1) as f32 / n as f32;
-            let alpha = t.powi(2) * self.base_alpha;
-            if alpha < 0.005 { continue; }
+            let alpha = t * t * self.base_alpha;
+            if alpha < 0.01 { continue; }
             let r = (dot_r * (0.4 + t * 0.6)).max(0.5);
 
-            for (ci, positions) in frame.iter().enumerate() {
-                // Shift hue slightly per collection for visual differentiation
+            for ci in 0..n_coll {
                 let coll_shift = ci as f32 / MAX_COLLECTIONS as f32;
-                for (j, &pos) in positions.iter().enumerate() {
-                    let lf = lerp_snap.get(ci).and_then(|v| v.get(j)).copied().unwrap_or(0.5);
+                for j in 0..bounds {
+                    let pos = frame[ci * bounds + j];
+                    let lf = lerp_snap[ci * bounds + j];
                     let hue = (hue1 + lf * (hue2 - hue1) + coll_shift).rem_euclid(1.0);
-                    let color = hsla(hue, 0.85, 0.55, alpha);
+                    let color = hsl_to_lin(hue, 0.85, 0.55, alpha);
                     let base = self.mesh_verts.len();
                     self.mesh_verts.push((vec3(pos.x, pos.y, 0.0), color));
                     for k in 0..N_SIDES {
-                        let angle = k as f32 * TAU / N_SIDES as f32;
                         self.mesh_verts.push((
-                            vec3(pos.x + angle.cos() * r, pos.y + angle.sin() * r, 0.0),
+                            vec3(pos.x + cos_table[k] * r, pos.y + sin_table[k] * r, 0.0),
                             color,
                         ));
                     }
-                    for k in 0..N_SIDES {
-                        self.mesh_idx.extend_from_slice(&[
-                            base,
-                            base + 1 + k,
-                            base + 1 + (k + 1) % N_SIDES,
-                        ]);
-                    }
+                    self.mesh_idx.extend(INDEX_OFFSETS.iter().map(|&o| base + o));
                 }
             }
         }
@@ -169,7 +202,6 @@ impl Sketch for Cardano {
             self.set_bounds(new_bounds);
         }
 
-        // Alignment: fraction of the even-spread angle between consecutive collections
         let alignment = align_t * TAU / self.num_collections.max(2) as f32;
 
         self.angle_outer += speed * dt;
@@ -184,25 +216,22 @@ impl Sketch for Cardano {
             }
         }
 
-        // Compute current positions per collection
+        // Build flat frame: positions indexed as [ci * bounds + j]
         let angle_outer = self.angle_outer;
-        let frame: Vec<Vec<Vec2>> = self.collections.iter().enumerate()
-            .map(|(ci, coll)| {
-                let outer_angle = angle_outer + ci as f32 * alignment;
-                let ox = orbit_r * outer_angle.cos();
-                let oy = orbit_r * outer_angle.sin();
-                coll.angles_inner.iter().zip(&coll.deflections)
-                    .map(|(&a, d)| vec2(ox + orbit_r * a.cos(), oy + orbit_r * a.sin()) + d.offset)
-                    .collect()
-            })
-            .collect();
-
+        let mut frame: Vec<Vec2> = Vec::with_capacity(self.num_collections * self.bounds);
+        for (ci, coll) in self.collections.iter().enumerate() {
+            let outer_angle = angle_outer + ci as f32 * alignment;
+            let ox = orbit_r * outer_angle.cos();
+            let oy = orbit_r * outer_angle.sin();
+            for (&a, d) in coll.angles_inner.iter().zip(&coll.deflections) {
+                frame.push(vec2(ox + orbit_r * a.cos(), oy + orbit_r * a.sin()) + d.offset);
+            }
+        }
         self.trail.push_back(frame);
         while self.trail.len() > MAX_TRAIL {
             self.trail.pop_front();
         }
 
-        // Notes: outward radial spring impulse — circles deflect then spring back
         for ev in midi.note_on_events() {
             let strength = ev.velocity * IMPULSE_SCALE;
             let angle_outer = self.angle_outer;

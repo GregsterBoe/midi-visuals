@@ -26,6 +26,8 @@ Three layers. **`main.rs`** owns the Nannou window and the active sketch. **`mid
 | 13 | `rings` refinements — dual rain color split; CC 29 r-spread; expanded knob ranges | `[DONE]` |
 | 14 | `cardano` sketch — Spirograph epicycloid circles with spring deflection on notes; multi-collection; alignment knob | `[DONE]` |
 | 15 | `cardano` MIDI expansion — mod wheel + pitch bend for hue; CC 24 circle count knob; CC 25 dot radius | `[DONE]` |
+| 16 | `cardano` performance — `LinSrgba` mesh vertices; precomputed sin/cos table; flat trail; const index fan | `[DONE]` |
+| 17 | Remove `aurora` + `grid`; add `fireworks` — pitch→X launch, velocity→burst radius, 6 CC knobs | `[DONE]` |
 
 ---
 
