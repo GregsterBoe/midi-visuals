@@ -1,5 +1,5 @@
 use crate::midi::{MidiState, NoteState};
-use crate::sketches::{Param, Sketch};
+use crate::sketches::{zodiac_points, Param, Sketch};
 use nannou::prelude::*;
 use nannou::rand::{thread_rng, Rng};
 use std::cell::Cell;
@@ -121,50 +121,40 @@ fn tension_from_notes(notes: &[NoteState; 128]) -> f32 {
 // ── Burst forms ───────────────────────────────────────────────────────────────
 
 /// Particle emission pattern for a shell burst.
-/// Add new variants here to extend the form library (e.g. zodiac animals).
+/// Add SVG silhouettes to assets/ and re-run scripts/gen_zodiac.py to extend
+/// the Animal library without touching this file.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum BurstForm {
-    Scatter,  // random radial — default single-note form
-    Ring,     // evenly-spaced circle — major chords
-    Star,     // 5-arm star — diminished / dom7
-    Spiral,   // golden-angle Archimedean — minor chords
-    Cross,    // 4-arm cross — augmented chords
-    // Future: Dragon, Tiger, Phoenix, Ox, … (Chinese zodiac)
+    Scatter,                                    // random radial — reserved
+    Ring,                                       // evenly-spaced circle — reserved
+    Star,                                       // 5-arm star — reserved
+    Spiral,                                     // golden-angle Archimedean — reserved
+    Cross,                                      // 4-arm cross — reserved
+    Animal { name: &'static str, points: &'static [(f32, f32)] },
 }
 
 impl BurstForm {
-    const COUNT: usize = 5;
-
-    /// Cycle through simple forms for single-note bursts.
+    /// Cycle through the animal registry.
     fn cycle(index: usize) -> Self {
-        match index % Self::COUNT {
-            0 => Self::Scatter,
-            1 => Self::Ring,
-            2 => Self::Star,
-            3 => Self::Spiral,
-            _ => Self::Cross,
-        }
+        let animals = zodiac_points::ANIMALS;
+        let (name, points) = animals[index % animals.len()];
+        Self::Animal { name, points }
     }
 
-    /// Chord-quality override. Returns None for single notes (use cycle()).
-    fn from_chord(q: ChordQuality) -> Option<Self> {
-        match q {
-            ChordQuality::Major      => Some(Self::Ring),
-            ChordQuality::Minor      => Some(Self::Spiral),
-            ChordQuality::Diminished => Some(Self::Star),
-            ChordQuality::Augmented  => Some(Self::Cross),
-            ChordQuality::Dom7th     => Some(Self::Star),
-            ChordQuality::Other      => None,
-        }
+    /// Chord-quality override — currently disabled (animals always used).
+    fn from_chord(_q: ChordQuality) -> Option<Self> {
+        None
     }
 
     fn name(self) -> &'static str {
         match self {
-            Self::Scatter => "scatter",
-            Self::Ring    => "ring",
-            Self::Star    => "star",
-            Self::Spiral  => "spiral",
-            Self::Cross   => "cross",
+            Self::Scatter              => "scatter",
+            Self::Ring                 => "ring",
+            Self::Star                 => "star",
+            Self::Spiral               => "spiral",
+            Self::Cross                => "cross",
+            Self::Animal { name, .. }  => name,
         }
     }
 
@@ -185,6 +175,10 @@ impl BurstForm {
                 let base = (i % 4) as f32 / 4.0 * TAU;
                 base + rng.gen_range(-0.2f32..0.2)
             }
+            Self::Animal { points, .. } => {
+                let (px, py) = points[i % points.len()];
+                py.atan2(px) + rng.gen_range(-0.12f32..0.12)
+            }
         }
     }
 
@@ -194,16 +188,20 @@ impl BurstForm {
             Self::Scatter => rng.gen_range(0.6f32..1.0),
             Self::Ring    => rng.gen_range(0.88f32..1.0),
             Self::Star => {
-                // Particles near arm centers fly faster than gap particles
                 let arm_frac = (i as f32 * 5.0 / n as f32).fract();
                 let arm_peak = 1.0 - (arm_frac * 2.0 - 1.0).abs();
                 (0.6 + arm_peak * 0.4) * rng.gen_range(0.9f32..1.0)
             }
             Self::Spiral => {
                 let t = i as f32 / n as f32;
-                0.3 + t * 0.7  // inner particles slower, outer faster
+                0.3 + t * 0.7
             }
-            Self::Cross   => rng.gen_range(0.7f32..1.0),
+            Self::Cross => rng.gen_range(0.7f32..1.0),
+            Self::Animal { points, .. } => {
+                let (px, py) = points[i % points.len()];
+                let dist = (px * px + py * py).sqrt().clamp(0.2, 1.0);
+                dist * rng.gen_range(0.9f32..1.0)
+            }
         }
     }
 }
@@ -265,7 +263,7 @@ impl Fireworks {
             prev_chord: ChordQuality::Other,
             current_chord: ChordQuality::Other,
             current_tension: 0.0,
-            last_form: BurstForm::Scatter,
+            last_form: BurstForm::cycle(0),
         }
     }
 

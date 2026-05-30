@@ -264,12 +264,16 @@ forms in sequence.
 | `Spiral` | Golden-angle Archimedean; inner slower | Minor |
 | `Cross` | 4-arm cross ± narrow spread | Augmented |
 
-**Extension path:** add a new variant to the `BurstForm` enum and implement
-`particle_angle()` + `speed_scale()` arms for it. Add an entry in
-`BurstForm::cycle()` and optionally `BurstForm::from_chord()`. No other
-changes required. Chinese zodiac shapes (Dragon, Tiger, Phoenix, …) would
-each define a unique angle/speed curve that traces their silhouette when
-particles freeze at peak velocity.
+**Current animal library** (from `assets/` SVGs, generated via `scripts/gen_zodiac.py`):
+butterfly, cock, elephant, gecko, horse, pig, cobra, spider, cat, squirrel, frog
+
+**Extension path:** drop a new SVG silhouette into `assets/`, add an entry to
+`FILES` in `scripts/gen_zodiac.py`, and re-run it:
+```
+python3 scripts/gen_zodiac.py > src/sketches/zodiac_points.rs
+```
+No changes to `fireworks.rs` required — `BurstForm::cycle()` picks up new
+animals automatically from the `ANIMALS` registry in `zodiac_points.rs`.
 
 ---
 

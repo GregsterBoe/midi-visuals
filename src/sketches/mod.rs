@@ -3,6 +3,7 @@ pub mod droplets;
 pub mod fireworks;
 pub mod particles;
 pub mod rings;
+pub mod zodiac_points;
 
 use crate::midi::MidiState;
 use nannou::prelude::*;
