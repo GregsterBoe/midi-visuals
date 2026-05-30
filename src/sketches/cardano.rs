@@ -1,9 +1,9 @@
-use crate::midi::MidiState;
+use crate::midi::{MidiState, NoteState};
 use crate::sketches::{Param, Sketch};
 use nannou::prelude::*;
 use nannou::rand::{thread_rng, Rng};
 use std::cell::Cell;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 const PARAMS: &[Param] = &[
     Param::new(1,  "hue",     0.0,    1.0),  // mod wheel; pitch bend controls hue2
@@ -24,7 +24,83 @@ const SPRING_K: f32 = 6.0;
 const SPRING_DAMP: f32 = 3.5;
 const IMPULSE_SCALE: f32 = 250.0;
 
-// Triangle fan: center at index 0, perimeter verts 1..=N_SIDES.
+// --- Music theory ---------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ChordQuality { Major, Minor, Diminished, Augmented, Dom7th, Other }
+
+impl ChordQuality {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Major      => "maj",
+            Self::Minor      => "min",
+            Self::Diminished => "dim",
+            Self::Augmented  => "aug",
+            Self::Dom7th     => "dom7",
+            Self::Other      => "",
+        }
+    }
+}
+
+fn detect_chord(notes: &[NoteState; 128]) -> ChordQuality {
+    let mut classes: Vec<u8> = (0u8..128)
+        .filter(|&n| notes[n as usize].on)
+        .map(|n| n % 12)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    classes.sort_unstable();
+    if classes.len() < 3 { return ChordQuality::Other; }
+    let root = classes[0];
+    let intervals: Vec<u8> = classes.iter().map(|&c| (c + 12 - root) % 12).collect();
+    let has = |n: u8| intervals.contains(&n);
+    if has(4) && has(7) && has(10) { return ChordQuality::Dom7th; }
+    if has(3) && has(6)            { return ChordQuality::Diminished; }
+    if has(4) && has(8)            { return ChordQuality::Augmented; }
+    if has(4) && has(7)            { return ChordQuality::Major; }
+    if has(3) && has(7)            { return ChordQuality::Minor; }
+    ChordQuality::Other
+}
+
+fn consonance_score(semitones: u8) -> f32 {
+    match semitones % 12 {
+        0  => 1.00,
+        7  => 0.85,
+        5  => 0.80,
+        4  => 0.70,
+        3  => 0.65,
+        9  => 0.60,
+        8  => 0.55,
+        2  => 0.35,
+        10 => 0.30,
+        11 => 0.15,
+        1  => 0.10,
+        6  => 0.00,
+        _  => 0.50,
+    }
+}
+
+fn tension_from_notes(notes: &[NoteState; 128]) -> f32 {
+    let held: Vec<u8> = (0..128u8).filter(|&n| notes[n as usize].on).collect();
+    if held.len() < 2 { return 0.0; }
+    let min_consonance = held.iter().enumerate()
+        .flat_map(|(i, &a)| held[i + 1..].iter().map(move |&b| consonance_score(b.wrapping_sub(a))))
+        .fold(1.0f32, f32::min);
+    1.0 - min_consonance
+}
+
+fn chord_hue(q: ChordQuality) -> Option<f32> {
+    match q {
+        ChordQuality::Major      => Some(0.10),
+        ChordQuality::Minor      => Some(0.65),
+        ChordQuality::Diminished => Some(0.80),
+        ChordQuality::Augmented  => Some(0.48),
+        ChordQuality::Dom7th     => Some(0.98),
+        ChordQuality::Other      => None,
+    }
+}
+
+// --- Triangle fan: center at index 0, perimeter verts 1..=N_SIDES.
 // Hardcoded for N_SIDES=8 to avoid a per-dot loop with modulo.
 const INDEX_OFFSETS: [usize; N_SIDES * 3] = [
     0, 1, 2,   0, 2, 3,   0, 3, 4,   0, 4, 5,
@@ -67,6 +143,8 @@ pub struct Cardano {
     // once per vertex inside Nannou's draw path (~9× fewer conversions).
     mesh_verts: Vec<(Vec3, LinSrgba)>,
     mesh_idx: Vec<usize>,
+    current_chord: ChordQuality,
+    current_tension: f32,
 }
 
 /// HSL (hue in [0,1]) → linear-sRGB RGBA, computed once per circle.
@@ -103,6 +181,8 @@ impl Cardano {
             win: Cell::new(Rect::from_w_h(800.0, 600.0)),
             mesh_verts: Vec::new(),
             mesh_idx: Vec::new(),
+            current_chord: ChordQuality::Other,
+            current_tension: 0.0,
         }
     }
 
@@ -202,6 +282,18 @@ impl Sketch for Cardano {
             self.set_bounds(new_bounds);
         }
 
+        // Music theory
+        self.current_chord = detect_chord(&midi.notes);
+        self.current_tension = tension_from_notes(&midi.notes);
+        // Chord quality overrides the mod-wheel hue; no chord → use CC 1 as-is
+        let effective_hue1 = chord_hue(self.current_chord).unwrap_or(hue1);
+        // Tension above 0.2 wobbles each dot's inner orbit radius → irregular loops
+        let wobble_amp = if self.current_tension > 0.2 {
+            (self.current_tension - 0.2) * orbit_r * 0.20
+        } else {
+            0.0
+        };
+
         let alignment = align_t * TAU / self.num_collections.max(2) as f32;
 
         self.angle_outer += speed * dt;
@@ -216,7 +308,10 @@ impl Sketch for Cardano {
             }
         }
 
-        // Build flat frame: positions indexed as [ci * bounds + j]
+        let mut rng = thread_rng();
+
+        // Build flat frame: positions indexed as [ci * bounds + j].
+        // Each dot gets an independently jittered radius when tension is high.
         let angle_outer = self.angle_outer;
         let mut frame: Vec<Vec2> = Vec::with_capacity(self.num_collections * self.bounds);
         for (ci, coll) in self.collections.iter().enumerate() {
@@ -224,7 +319,12 @@ impl Sketch for Cardano {
             let ox = orbit_r * outer_angle.cos();
             let oy = orbit_r * outer_angle.sin();
             for (&a, d) in coll.angles_inner.iter().zip(&coll.deflections) {
-                frame.push(vec2(ox + orbit_r * a.cos(), oy + orbit_r * a.sin()) + d.offset);
+                let r = if wobble_amp > 0.0 {
+                    orbit_r + rng.gen_range(-wobble_amp..wobble_amp)
+                } else {
+                    orbit_r
+                };
+                frame.push(vec2(ox + r * a.cos(), oy + r * a.sin()) + d.offset);
             }
         }
         self.trail.push_back(frame);
@@ -235,17 +335,25 @@ impl Sketch for Cardano {
         for ev in midi.note_on_events() {
             let strength = ev.velocity * IMPULSE_SCALE;
             let angle_outer = self.angle_outer;
+            // High notes bias impulse upward, low notes downward — melody rises and falls
+            let pitch_bias = vec2(0.0, ev.note as f32 / 127.0 * 2.0 - 1.0);
             for coll in &mut self.collections {
                 for i in 0..coll.deflections.len() {
                     let orbit_angle = angle_outer + coll.angles_inner[i];
                     let radial = vec2(orbit_angle.cos(), orbit_angle.sin());
-                    coll.deflections[i].velocity += radial * strength;
+                    let dir_raw = radial + pitch_bias;
+                    let impulse_dir = if dir_raw.length_squared() > 0.001 {
+                        dir_raw.normalize()
+                    } else {
+                        radial
+                    };
+                    coll.deflections[i].velocity += impulse_dir * strength;
                 }
             }
             self.base_alpha = ev.velocity.max(0.4);
         }
 
-        self.build_mesh(hue1, hue2, dot_r, trail_len);
+        self.build_mesh(effective_hue1, hue2, dot_r, trail_len);
     }
 
     fn view(&self, draw: &Draw, win: Rect) {
@@ -263,9 +371,15 @@ impl Sketch for Cardano {
     fn params(&self) -> &[Param] { PARAMS }
 
     fn hud_info(&self) -> Option<String> {
+        let chord_str = self.current_chord.name();
+        let theory = if chord_str.is_empty() {
+            format!("tension:{:.0}%", self.current_tension * 100.0)
+        } else {
+            format!("{}  tension:{:.0}%", chord_str, self.current_tension * 100.0)
+        };
         Some(format!(
-            "{}x{} circles  {} frames",
-            self.num_collections, self.bounds, self.trail.len()
+            "{}x{} circles  {} frames  {}",
+            self.num_collections, self.bounds, self.trail.len(), theory
         ))
     }
 

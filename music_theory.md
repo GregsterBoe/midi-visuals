@@ -150,16 +150,32 @@ a visual.
 
 | Source | Value read | Effect |
 |--------|-----------|--------|
-| Note velocity | `ev.velocity` | Radial spring impulse strength; base alpha |
-| *(note number not used)* | — | The spring fires outward in the current orbital direction regardless of pitch |
+| Note velocity | `ev.velocity` | Spring impulse strength; base alpha |
+| Note number | `ev.note / 127.0` | Impulse direction bias: high notes push upward, low notes downward |
+| Held notes (chord) | `detect_chord()` | Overrides CC 1 hue with chord-specific colour (see table below) |
+| Held notes (tension) | `tension_from_notes()` | Wobbles each dot's inner orbit radius when tension > 0.2 — dissonant intervals break the clean Spirograph into irregular loops |
 
-**Current theory depth:** dynamics only. Pitch carries no meaning — any note
-triggers the same geometric response scaled by how hard it is hit.
+**Chord quality → hue:**
 
-**Natural extensions:** map note pitch to impulse direction (high notes push
-outward from the top of the orbit, low notes from the bottom); detect
-consonance between held notes and modulate spring stiffness (consonant = tight
-snap-back, dissonant = loose wobble).
+| Chord | Hue | Feel |
+|-------|-----|------|
+| Major | warm gold (0.10) | Open, resolved |
+| Minor | blue-violet (0.65) | Introspective, dark |
+| Diminished | deep magenta (0.80) | Tense, angular |
+| Augmented | alien cyan (0.48) | Eerie, unresolved |
+| Dom7th | blood red (0.98) | Pulling, urgent |
+| Single note / no chord | CC 1 (mod wheel) | Full user control |
+
+**Current theory depth:** pitch, velocity, chord quality, and harmonic tension
+are all mapped to distinct visual parameters. Pitch bend (CC pitch bend) still
+controls hue2 (the gradient end colour). Playing a chord shifts the trail
+colour instantly; holding dissonant intervals gradually frays the Spirograph
+geometry into imperfect, unstable loops — releasing into a consonant chord lets
+the geometry settle back to its clean pattern.
+
+**Remaining extension ideas:** spring stiffness modulated by consonance
+(consonant chord = tighter snap-back, diminished = loose wobble); impulse
+count tied to chord note count (triad = 3 dots deflected, 7th chord = 4).
 
 ---
 
