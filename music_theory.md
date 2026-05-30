@@ -186,17 +186,28 @@ intervals could spawn clusters that visually repel each other.
 |--------|-----------|--------|
 | Note number | `ev.note / 127.0` | Horizontal launch position: low notes → left, high notes → right |
 | Note velocity | `ev.velocity` | Burst radius (burst_vel = 80 + velocity × 520 px/s): soft = tight, hard = expansive |
+| Held notes (chord) | `detect_chord()` | Overrides burst hue and burst form (see table below) |
+| Held notes (tension) | `tension_from_notes()` | Jitters rising shell X position when tension > 0.3 |
+| Chord transition Dom7→I | V7→Major/Minor transition | Grand finale: all shells burst instantly + centred mega-ring spawned |
 
-**Current theory depth:** pitch as horizontal position; velocity as explosion
-size. Playing a chord fires simultaneous shells across the screen at widths
-proportional to the chord's voicing spread. Playing a scale produces a sweep of
-launches from left to right.
+**Chord quality → hue and form:**
 
-**Natural extensions:** chord quality could colour the burst — major bursts
-in warm tones, minor in cool, diminished in dark desaturated hues, augmented in
-alien green-cyan. Dissonant intervals could add a jitter/stutter to the rising
-shell. Tension-resolution (V7→I) could trigger a "grand finale" burst that
-clears all particles and fires a single centred explosion.
+| Chord | Hue | Form | Feel |
+|-------|-----|------|------|
+| Major | warm gold (0.10) | Ring | Stable, complete circle |
+| Minor | blue-violet (0.65) | Spiral | Introspective, curving inward |
+| Diminished | deep magenta (0.80) | Star (5-arm) | Tense, sharp, angular |
+| Augmented | alien cyan (0.48) | Cross (4-arm) | Eerie, unresolved |
+| Dom7th | blood red (0.98) | Star | Strong pull; jitter intensifies |
+| Single note | CC 24 base hue | Cycles (Scatter → Ring → Star → Spiral → Cross) | |
+
+**Current theory depth:** the richest of all sketches. Pitch, velocity, chord
+quality, harmonic tension, and tension-resolution are all mapped to distinct
+visual parameters. Playing a dominant-seventh chord and then resolving to a
+major or minor triad triggers the V7→I grand finale.
+
+**Remaining extension ideas:** melodic interval size (larger leap = faster
+shell ascent); scale conformity colouring (chromatic notes = desaturated shell).
 
 ---
 
@@ -236,6 +247,29 @@ relationships visually.
 than raw pitch — a perfect 5th between two notes could produce a complementary
 hue pair, a tritone an intentionally clashing pair. The ring expand-speed could
 vary with melodic interval size (larger leap = faster expansion).
+
+---
+
+## Burst form library (`fireworks` only)
+
+Each shell carries a `BurstForm` that controls how particles are emitted at
+the apex. The form is selected by chord quality; single notes cycle through all
+forms in sequence.
+
+| Form | Pattern | Assigned chord |
+|------|---------|----------------|
+| `Scatter` | Random radial — fully uniform sphere | single note (cycle 0) |
+| `Ring` | Evenly-spaced circle ± small jitter | Major |
+| `Star` | 5-arm star; arm-centre particles faster | Diminished / Dom7th |
+| `Spiral` | Golden-angle Archimedean; inner slower | Minor |
+| `Cross` | 4-arm cross ± narrow spread | Augmented |
+
+**Extension path:** add a new variant to the `BurstForm` enum and implement
+`particle_angle()` + `speed_scale()` arms for it. Add an entry in
+`BurstForm::cycle()` and optionally `BurstForm::from_chord()`. No other
+changes required. Chinese zodiac shapes (Dragon, Tiger, Phoenix, …) would
+each define a unique angle/speed curve that traces their silhouette when
+particles freeze at peak velocity.
 
 ---
 
