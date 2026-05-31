@@ -291,27 +291,57 @@ becomes the bottleneck — the trigger for a compute-shader physics pass.
 
 ### `cardano`
 
+**Pass 1 — CPU trail rebuild cost** *(was the original bottleneck)*
+
 **Bottleneck:** At high trail (500 frames) × 4 collections × 16 circles the sketch pushed ~288k vertices and ~710k indices per frame. Three compounding costs:
 
-1. **Per-vertex HSL→linear conversion** — Nannou's `draw.mesh()` path called `into_lin_srgba()` on every stored `Hsla` vertex (~9 times per circle, since center + N_SIDES=8 perimeter verts all shared the same color). At ~29k circles per frame that was ~266k conversions.
+1. **Per-vertex HSL→linear conversion** — Nannou's `draw.mesh()` path called `into_lin_srgba()` on every stored `Hsla` vertex (center + N_SIDES=8 perimeter verts all shared the same color). At ~29k circles per frame: ~266k conversions.
+2. **Redundant trig** — `sin`/`cos` for each polygon offset recalculated for every dot: 8 × 2 × ~29k = ~470k trig ops per frame.
+3. **Triple-nested heap allocation** — `VecDeque<Vec<Vec<Vec2>>>` allocated one inner Vec per collection per frame. At 60 fps with 4 collections: 240 extra heap allocs/sec plus poor cache locality.
 
-2. **Redundant trig** — `sin` and `cos` for each of the N_SIDES=8 polygon offsets were recalculated for every dot (8 angle × 2 trig calls × ~29k dots = ~470k trig ops per frame).
+**What was done (now superseded by Pass 2):**
+- `LinSrgba` vertex colors, HSL computed once per dot via `hsl_to_lin()`.
+- `cos_table` / `sin_table` precomputed once per frame.
+- Flattened trail to `VecDeque<Vec<Vec2>>` (one allocation per frame).
+- `INDEX_OFFSETS` const array replaces the inner fan loop.
+- Angular recording threshold: trail frame recorded only every `RECORD_STEP = 0.02` outer-orbit radians — sparse at low speed.
+- Speed-adaptive trail cap + temporal decimation in `build_mesh()`.
 
-3. **Triple-nested heap allocation** — `VecDeque<Vec<Vec<Vec2>>>` stored each frame as an outer Vec of inner Vecs, one inner allocation per collection. At 60 fps with 4 collections: 240 extra heap allocs/sec plus poor cache locality when iterating.
+---
 
-**What was done:**
+**Pass 2 — GPU framebuffer accumulation** *(current implementation)*
 
-- Changed `mesh_verts` type from `Vec<(Vec3, Hsla)>` to `Vec<(Vec3, LinSrgba)>`. Color is now converted once per circle via `hsl_to_lin()` instead of once per vertex inside Nannou. `LinSrgba` satisfies `IntoLinSrgba<f32>` as a no-op copy. Note: palette 0.5.0 (the version Nannou 0.19 vendors) uses `LinSrgba::new(r, g, b, a)` with four flat `f32` args.
+**Problem with Pass 1:** Even after the CPU-side reductions, performance scaled with trail length × dot count. At trail = 500 and 64 dots: `build_mesh()` still processed up to 32 000 dots per frame and emitted ~288k vertices. The fundamental issue was that the trail was stored as a history of positions and rebuilt into geometry every frame.
 
-- Added `hsl_to_lin(h, s, l, a) -> LinSrgba` helper: HSL→sRGB formula (piecewise linear, no powf), skipping the final sRGB→linear gamma step for speed. Colors are slightly brighter but imperceptible in a dark visualizer.
+**Architecture switch — persistent GPU texture:**
 
-- Precomputed `cos_table: [f32; N_SIDES]` and `sin_table: [f32; N_SIDES]` at the top of `build_mesh()`. 8 trig calls per frame instead of 8 × ~29k.
+The entire CPU trail (`VecDeque`, `build_mesh()`, lerp cache, angular recording, temporal decimation) was removed. The trail now lives as pixels in a persistent `wgpu::Texture` (`Rgba8Unorm`, window-sized) stored on the GPU. Each frame, three wgpu render passes update it:
 
-- Flattened trail from `VecDeque<Vec<Vec<Vec2>>>` to `VecDeque<Vec<Vec2>>`. Each frame is a single contiguous allocation `[c0d0, c0d1, ..., c1d0, ...]` indexed as `[ci * bounds + j]`. Reduces per-frame heap allocs from `1 + n_collections` to `1` and improves iteration cache locality.
+| Pass | Blend | What it does |
+|------|-------|--------------|
+| OVER fade | `src_factor=One, dst_factor=OneMinusSrcAlpha` | Multiplies all RGB by `(1 − fade_alpha)` — exponential dim |
+| Subtract | `ReverseSubtract` (dst − src) | Subtracts `1/255` per channel — snaps near-zero to exactly 0 |
+| Dots | `OVER` (premultiplied) | Draws current orbit positions fresh at full brightness |
 
-- Replaced the per-dot `for k in 0..N_SIDES` index loop with a const `INDEX_OFFSETS: [usize; N_SIDES * 3]` array and a single `extend()`. Hardcodes the fan triangulation for N_SIDES=8 in one slice.
+`view()` calls `draw.texture(&accum_texture)` to display the previous frame's state; `raw_render()` updates the texture for the next frame (1-frame lag, imperceptible).
 
-- Raised alpha cull threshold from `0.005` to `0.01` (~50% more leading frames pruned at full trail depth).
+**Why the subtract pass is necessary:**
+
+With 8-bit `Rgba8Unorm` and `OVER` blend, the minimum non-zero value (`1/255 ≈ 0.004 linear`) never decrements further — `round((1 − fade_alpha) × 1.0) = 1` for any `fade_alpha < 0.5`. On an sRGB display, `0.004 linear` appears as ~7% grey. The subtract pass (`dst − 1/255`, clamped at 0) guarantees the floor is reached in finite time, after which the pixel is exactly `0` = black.
+
+**Performance result:** The per-frame CPU cost is now constant regardless of trail length or dot count — only the current frame's dot positions are touched (≤ 576 vertices for the maximum configuration). Trail length from 1 to 1000 frames has zero CPU cost difference.
+
+**Key wgpu/Nannou gotchas for this pattern (don't guess):**
+
+- `wgpu::Texture` in nannou scope is `nannou_wgpu::Texture` — a wrapper that impls `ToTextureView` and is accepted by `draw.texture()`. It derefs to the raw wgpu handle.
+- `wgpu::TextureView` is nannou's wrapper; `&*view` gives `&wgpu::TextureViewHandle` for render pass color attachments.
+- `Operations { store: bool }` in wgpu 0.17.2 — `store` is a plain `bool`, not `StoreOp`.
+- `BlendComponent::OVER` = `{ src: One, dst: OneMinusSrcAlpha, op: Add }` — premultiplied alpha. The dot fragment shader must output `vec4(col.rgb * col.a, col.a)`.
+- Fade shader outputs `(0, 0, 0, fade_alpha)` — premultiplied black. Combined with OVER blend: `result_rgb = (1 − fade_alpha) × dst_rgb`.
+- Subtract shader outputs `(1/255, 1/255, 1/255, 0)`. Blend: `ReverseSubtract` with `(One, One)` for color, `(Zero, One, Add)` for alpha (preserves alpha unchanged).
+- `bytemuck = { version = "1", features = ["derive"] }` required for `#[derive(Pod, Zeroable)]` on custom vertex structs.
+- Interior mutability via `RefCell<Option<GpuAccum>>` is needed because `raw_render()` takes `&self`.
+- The accumulation texture is recreated on window resize; `gpu.cleared = false` triggers a one-shot `LoadOp::Clear` on the next frame.
 
 *Add a new section under "Per-Sketch" for each sketch that receives a
 non-trivial optimization pass.*
