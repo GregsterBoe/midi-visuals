@@ -2,6 +2,7 @@ pub mod cardano;
 pub mod chess;
 pub mod droplets;
 pub mod fireworks;
+pub mod mandala;
 pub mod particles;
 pub mod rings;
 pub mod zodiac_points;
@@ -57,6 +58,7 @@ pub fn registry() -> Vec<(&'static str, SketchFactory)> {
         ("chess",     || Box::new(chess::Chess::new())),
         ("droplets",  || Box::new(droplets::Droplets::new())),
         ("fireworks", || Box::new(fireworks::Fireworks::new())),
+        ("mandala",   || Box::new(mandala::Mandala::new())),
         ("particles", || Box::new(particles::Particles::new())),
         ("rings",     || Box::new(rings::Rings::new())),
     ]
