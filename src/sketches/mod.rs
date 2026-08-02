@@ -2,6 +2,7 @@ pub mod cardano;
 pub mod chess;
 pub mod droplets;
 pub mod fireworks;
+pub mod kaleidoscope;
 pub mod mandala;
 pub mod particles;
 pub mod rings;
@@ -54,12 +55,13 @@ pub type SketchFactory = fn() -> Box<dyn Sketch>;
 
 pub fn registry() -> Vec<(&'static str, SketchFactory)> {
     vec![
-        ("cardano",   || Box::new(cardano::Cardano::new())),
-        ("chess",     || Box::new(chess::Chess::new())),
-        ("droplets",  || Box::new(droplets::Droplets::new())),
-        ("fireworks", || Box::new(fireworks::Fireworks::new())),
-        ("mandala",   || Box::new(mandala::Mandala::new())),
-        ("particles", || Box::new(particles::Particles::new())),
-        ("rings",     || Box::new(rings::Rings::new())),
+        ("cardano",       || Box::new(cardano::Cardano::new())),
+        ("chess",         || Box::new(chess::Chess::new())),
+        ("droplets",      || Box::new(droplets::Droplets::new())),
+        ("fireworks",     || Box::new(fireworks::Fireworks::new())),
+        ("kaleidoscope",  || Box::new(kaleidoscope::Kaleidoscope::new())),
+        ("mandala",       || Box::new(mandala::Mandala::new())),
+        ("particles",     || Box::new(particles::Particles::new())),
+        ("rings",         || Box::new(rings::Rings::new())),
     ]
 }
