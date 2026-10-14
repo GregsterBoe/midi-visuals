@@ -493,6 +493,10 @@ impl Sketch for Kaleidoscope {
         ))
     }
 
+    fn actions(&self) -> &[(Key, &'static str)] {
+        &[(Key::C, "Colour mode"), (Key::M, "Moiré"), (Key::P, "Pattern")]
+    }
+
     fn key_pressed(&mut self, key: Key) {
         match key {
             Key::C => self.color_mode   = (self.color_mode   + 1) % 3,

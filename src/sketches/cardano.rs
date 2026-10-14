@@ -774,6 +774,10 @@ impl Sketch for Cardano {
         ))
     }
 
+    fn actions(&self) -> &[(Key, &'static str)] {
+        &[(Key::C, "Collections"), (Key::R, "Clear trails")]
+    }
+
     fn key_pressed(&mut self, key: Key) {
         match key {
             Key::C => {

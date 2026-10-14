@@ -67,3 +67,37 @@ impl PresetStore {
         }
     }
 }
+
+/// Audio input choices kept between runs, so a source picked once in the
+/// control panel is used again next time.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct AudioSettings {
+    pub engine: usize,
+    pub gate_db: f32,
+    pub source: Option<String>,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self { engine: 0, gate_db: crate::audio::DEFAULT_GATE_DB, source: None }
+    }
+}
+
+const AUDIO_SETTINGS: &str = "presets/audio.json";
+
+impl AudioSettings {
+    pub fn load() -> Self {
+        fs::read_to_string(AUDIO_SETTINGS)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self) {
+        let _ = fs::create_dir_all("presets");
+        if let Ok(text) = serde_json::to_string_pretty(self) {
+            let _ = fs::write(AUDIO_SETTINGS, text);
+        }
+    }
+}

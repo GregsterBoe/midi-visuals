@@ -68,7 +68,7 @@ pub fn listen(args: &[String]) -> Result<(), String> {
         None => 0,
     };
     let secs = std::env::var("LISTEN_SECS").ok().and_then(|v| v.parse::<f32>().ok());
-    let input = AudioInput::start(engine, DEFAULT_GATE_DB)?;
+    let input = AudioInput::start(engine, DEFAULT_GATE_DB, None)?;
     let start = Instant::now();
     let mut last_meter = Instant::now();
     eprintln!("Listening{}. Ctrl-C to stop.", secs.map_or(String::new(), |s| format!(" for {s} s")));

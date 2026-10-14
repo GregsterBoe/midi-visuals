@@ -1,1 +1,4 @@
 /target
+
+# Per-machine audio input choice, written by the control panel
+presets/audio.json

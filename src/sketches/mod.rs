@@ -69,6 +69,8 @@ pub trait Sketch {
     fn params(&self) -> &[Param] { &[] }
     fn hud_info(&self) -> Option<String> { None }
     fn key_pressed(&mut self, _key: Key) {}
+    /// Keys `key_pressed` handles, with labels for the control panel's buttons.
+    fn actions(&self) -> &[(Key, &'static str)] { &[] }
     /// Optional raw wgpu render pass called after draw.to_frame(). Default is a no-op.
     fn raw_render(
         &self,

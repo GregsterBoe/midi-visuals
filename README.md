@@ -11,6 +11,21 @@ cargo run -- fireworks
 cargo run -- rings
 ```
 
+## Control panel
+
+While the app runs, it serves a control panel at <http://127.0.0.1:7878>. Press `W` in the
+window to open it in the browser, or start with `--open`. From the panel you can:
+
+- switch sketches and trigger their actions (reset, colour mode, rain, …)
+- move every knob of the active sketch with a slider, so a MIDI controller is optional
+- load, save and delete presets
+- switch notes between MIDI and audio, pick the audio source and pitch engine, and set the
+  noise gate on a live level meter
+- see the held notes on a keyboard, and the app's log (what used to scroll by in the terminal)
+
+The panel only answers on 127.0.0.1. `--port=<n>` changes the port; when it is taken, the next
+free one is used (the window's HUD shows which). `--no-panel` turns it off.
+
 ## Keyboard shortcuts
 
 | Key   | Action                          |
@@ -22,6 +37,7 @@ cargo run -- rings
 | `A`   | Switch notes between MIDI and audio input |
 | `E`   | Cycle the audio pitch engine    |
 | `-` / `=` | Audio noise gate down / up 3 dB |
+| `W`   | Open the control panel in the browser |
 
 The HUD (top-left) shows the active sketch name, current FPS, and a green dot that flashes on any note or knob input.
 Presets are saved per-sketch in `presets/<sketch_name>.txt`. CC 31 scrolls through saved presets.
@@ -57,7 +73,13 @@ Apache-2.0); the ONNX Runtime library is downloaded by the `ort` crate on the fi
 
 ### Choosing the input
 
-`AUDIO_DEVICE` only sees ALSA devices (`default`, `pulse`, `USB Audio`, …). To use any
+The easiest way is the **Listen to** menu in the control panel: it lists every PipeWire/Pulse
+source, and the level meter shows straight away whether the chosen one carries sound. To
+visualise music you're playing, pick the output you listen on under *Playing on this
+computer*. The choice switches live and is remembered in `presets/audio.json` together with
+the engine and gate.
+
+From the terminal: `AUDIO_DEVICE` only sees ALSA devices (`default`, `pulse`, `USB Audio`, …). To use any
 PipeWire/Pulse source, including the *monitor* of an output (to visualize the music you are
 listening to), go through the `pulse` device and name the source:
 

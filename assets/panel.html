@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>midi-visuals panel</title>
+<style>
+  :root {
+    --bg: #0e0f13;
+    --card: #171920;
+    --card-2: #1e212a;
+    --line: #2a2e39;
+    --text: #e6e8ee;
+    --dim: #8b91a1;
+    --faint: #5b6070;
+    --accent: #7c9cff;
+    --accent-2: #4f6fe0;
+    --good: #4cd18a;
+    --warn: #f0b44c;
+    --bad: #ef6464;
+    --radius: 10px;
+    --mono: ui-monospace, "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 12px 20px;
+    background: rgba(14, 15, 19, 0.92);
+    backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: 0.2px; }
+  header .now { color: var(--dim); }
+  header .now b { color: var(--text); font-weight: 600; }
+  header .spacer { flex: 1; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 10px; border-radius: 99px;
+    background: var(--card-2); color: var(--dim); font-size: 12px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
+  .dot.on { background: var(--good); box-shadow: 0 0 8px var(--good); }
+  .dot.bad { background: var(--bad); }
+
+  main {
+    display: grid; gap: 16px; padding: 16px 20px 28px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    max-width: 1280px; margin: 0 auto;
+  }
+  .col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  @media (max-width: 860px) {
+    main { grid-template-columns: minmax(0, 1fr); padding: 12px 16px 24px; }
+    header { padding: 10px 16px; }
+  }
+  body.offline main { opacity: 0.45; pointer-events: none; }
+
+  section {
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 14px 16px 16px;
+  }
+  section > h2 {
+    margin: 0 0 12px; font-size: 12px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--dim);
+    display: flex; align-items: center; gap: 8px;
+  }
+  section > h2 .side { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; }
+  .hint { color: var(--faint); font-size: 12px; margin: 8px 0 0; }
+  .empty { color: var(--faint); font-style: italic; }
+
+  button, select, input[type=text] {
+    font: inherit; color: var(--text);
+    background: var(--card-2); border: 1px solid var(--line); border-radius: 8px;
+  }
+  button { padding: 7px 12px; cursor: pointer; transition: background .12s, border-color .12s; }
+  button:hover { border-color: var(--faint); }
+  button:active { transform: translateY(1px); }
+  button.active { background: var(--accent-2); border-color: var(--accent); color: #fff; }
+  button.ghost { background: transparent; border-color: transparent; color: var(--dim); padding: 4px 8px; }
+  button.ghost:hover { color: var(--text); border-color: var(--line); }
+  select, input[type=text] { padding: 7px 10px; width: 100%; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .grid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); }
+  .grid button { text-transform: capitalize; text-align: left; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .actions { margin-top: 12px; }
+  .info { margin-top: 10px; color: var(--dim); font-family: var(--mono); font-size: 12px; }
+
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; background: var(--card-2); padding: 8px 16px; }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button.active { background: var(--accent-2); }
+
+  .engines { display: grid; gap: 8px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .engines button { text-align: left; padding: 8px 10px; }
+  .engines small { display: block; color: var(--dim); font-size: 11px; margin-top: 2px; }
+  .engines button.active small { color: #dfe5ff; }
+  @media (max-width: 480px) { .engines { grid-template-columns: minmax(0, 1fr); } }
+
+  .field { margin-top: 14px; }
+  .field > label { display: block; color: var(--dim); font-size: 12px; margin-bottom: 6px; }
+  .stats { display: flex; gap: 14px; flex-wrap: wrap; color: var(--dim); font-size: 12px; margin-top: 10px; font-family: var(--mono); }
+  .stats b { color: var(--text); font-weight: 500; }
+  .error { color: var(--bad); font-size: 13px; margin-top: 10px; }
+  .error:empty { display: none; }
+  .off-note { color: var(--warn); font-size: 12px; margin-top: 10px; }
+
+  /* Level meter with the gate slider laid over it on the same dB scale. */
+  .meter { position: relative; height: 26px; border-radius: 7px; background: var(--card-2); border: 1px solid var(--line); overflow: hidden; }
+  .meter .fill { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--faint); transition: width .08s linear; }
+  .meter .fill.open { background: linear-gradient(90deg, #2f9c64, var(--good)); }
+  .meter .gate { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--warn); }
+  .meter input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: ew-resize; }
+  .scale { display: flex; justify-content: space-between; color: var(--faint); font-size: 11px; font-family: var(--mono); margin-top: 4px; }
+
+  .param { display: grid; grid-template-columns: 150px minmax(0, 1fr) 64px; gap: 12px; align-items: center; padding: 5px 0; }
+  .param .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .param .cc { color: var(--faint); font-family: var(--mono); font-size: 11px; margin-right: 6px; }
+  .param .val { text-align: right; font-family: var(--mono); font-size: 12px; color: var(--dim); }
+  @media (max-width: 480px) { .param { grid-template-columns: 110px minmax(0, 1fr) 52px; gap: 8px; } }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+
+  .presets { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow: auto; }
+  .presets li { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+  .presets li .load { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .save { display: flex; gap: 8px; margin-top: 10px; }
+  .save input { flex: 1; }
+
+  .piano { position: relative; height: 70px; border-radius: 6px; overflow: hidden; background: #000; user-select: none; }
+  .piano .k { position: absolute; top: 0; }
+  .piano .w { height: 100%; background: #e9ebf0; border-right: 1px solid #9aa0ad; }
+  .piano .b { height: 60%; background: #1b1d24; border-radius: 0 0 2px 2px; z-index: 1; }
+  .piano .w.on { background: var(--accent); }
+  .piano .b.on { background: var(--accent-2); box-shadow: 0 0 6px var(--accent); }
+  .held { margin-top: 10px; font-family: var(--mono); min-height: 20px; color: var(--text); }
+
+  .log { font-family: var(--mono); font-size: 12px; max-height: 320px; overflow: auto; margin: 0; padding: 0; list-style: none; }
+  .log li { padding: 2px 0; border-bottom: 1px solid #1f222b; white-space: pre-wrap; word-break: break-word; }
+  .log time { color: var(--faint); margin-right: 8px; }
+  .log li.warn { color: var(--warn); }
+
+  .switch { display: inline-flex; align-items: center; gap: 8px; color: var(--dim); font-size: 13px; cursor: pointer; }
+  .switch input { accent-color: var(--accent); width: 16px; height: 16px; }
+</style>
+</head>
+<body class="offline">
+<header>
+  <h1>midi-visuals</h1>
+  <span class="now"><b id="now-sketch">…</b> <span id="now-fps"></span></span>
+  <span class="spacer"></span>
+  <label class="switch"><input type="checkbox" id="hud"> HUD in window</label>
+  <span class="pill"><span class="dot" id="conn-dot"></span><span id="conn">connecting…</span></span>
+</header>
+
+<main>
+  <div class="col">
+    <section>
+      <h2>Sketch</h2>
+      <div class="grid" id="sketches"></div>
+      <div class="row actions" id="actions"></div>
+      <div class="info" id="info"></div>
+    </section>
+
+    <section>
+      <h2>Knobs <span class="side hint" id="knob-hint"></span></h2>
+      <div id="params"></div>
+    </section>
+
+    <section>
+      <h2>Presets <span class="side hint">CC 31 scrolls them too</span></h2>
+      <ul class="presets" id="presets"></ul>
+      <form class="save" id="save-form">
+        <input type="text" id="save-name" placeholder="Save current knobs as…" maxlength="60">
+        <button type="submit">Save</button>
+      </form>
+    </section>
+  </div>
+
+  <div class="col">
+    <section>
+      <h2>Notes from
+        <span class="seg" style="margin-left:6px">
+          <button id="src-midi">MIDI</button><button id="src-audio">Audio</button>
+        </span>
+        <span class="side pill"><span class="dot" id="act-dot"></span><span id="act-label">idle</span></span>
+      </h2>
+      <div class="piano" id="piano"></div>
+      <div class="held" id="held"></div>
+      <div class="hint" id="midi-port"></div>
+    </section>
+
+    <section>
+      <h2>Audio input</h2>
+      <div class="field" style="margin-top:0">
+        <label for="source">Listen to</label>
+        <select id="source"></select>
+        <p class="hint" id="source-hint"></p>
+      </div>
+      <div class="field">
+        <label>Pitch engine</label>
+        <div class="engines" id="engines"></div>
+      </div>
+      <div class="field">
+        <label>Level and noise gate <span id="gate-val" style="color:var(--text)"></span>
+          <span style="color:var(--faint)">· drag to set; notes only count while the level is past the line</span></label>
+        <div class="meter">
+          <div class="fill" id="meter-fill"></div>
+          <div class="gate" id="meter-gate"></div>
+          <input type="range" id="gate" min="-90" max="-6" step="1" aria-label="Noise gate in dB">
+        </div>
+        <div class="scale"><span>-90 dB</span><span>-48</span><span>-6 dB</span></div>
+      </div>
+      <div class="stats" id="audio-stats"></div>
+      <div class="off-note" id="audio-off"></div>
+      <div class="error" id="audio-error"></div>
+    </section>
+
+    <section>
+      <h2>Log <span class="side"><button class="ghost" id="log-clear">clear</button></span></h2>
+      <ul class="log" id="log"></ul>
+    </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const noteName = (n) => NAMES[n % 12] + (Math.floor(n / 12) - 1);
+const ENGINE_INFO = {
+  "basic-pitch": "Chords · ~100 ms",
+  "swift-f0": "Single notes · fastest",
+  "dsp-poly": "Chords · no model, light",
+};
+const GATE_MIN = -90, GATE_MAX = -6;
+
+let logSeq = 0;
+let boot = null;
+let online = false;
+// Sliders the user is dragging ignore the polled value until shortly after release.
+const touched = new Map();
+const isTouched = (key) => (touched.get(key) || 0) > performance.now();
+const touch = (key) => touched.set(key, performance.now() + 600);
+
+async function send(cmd) {
+  try {
+    await fetch("/api/cmd", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cmd) });
+  } catch (_) { /* the next poll shows we're offline */ }
+}
+
+// Coalesce rapid slider moves into one message per animation frame.
+const pending = new Map();
+function sendSoon(key, cmd) {
+  if (!pending.has(key)) requestAnimationFrame(() => { send(pending.get(key)); pending.delete(key); });
+  pending.set(key, cmd);
+}
+
+// Rebuild a list only when what it shows changes, so focus and hover survive polling.
+const shown = {};
+function changed(key, value) {
+  const sig = JSON.stringify(value);
+  if (shown[key] === sig) return false;
+  shown[key] = sig;
+  return true;
+}
+
+function el(tag, props = {}, ...children) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else e[k] = v;
+  }
+  for (const c of children) e.append(c);
+  return e;
+}
+
+// ── Piano ───────────────────────────────────────────────────────────────────
+const LOW = 21, HIGH = 108; // A0..C8
+const keyEls = new Map();
+(function buildPiano() {
+  const isBlack = (n) => [1, 3, 6, 8, 10].includes(n % 12);
+  const whites = [];
+  for (let n = LOW; n <= HIGH; n++) if (!isBlack(n)) whites.push(n);
+  const w = 100 / whites.length;
+  let wi = 0;
+  for (let n = LOW; n <= HIGH; n++) {
+    const k = el("div", { title: noteName(n) });
+    if (isBlack(n)) {
+      k.className = "k b";
+      k.style.left = (wi * w - w * 0.32) + "%";
+      k.style.width = (w * 0.64) + "%";
+    } else {
+      k.className = "k w";
+      k.style.left = (wi * w) + "%";
+      k.style.width = w + "%";
+      wi++;
+    }
+    keyEls.set(n, k);
+    $("piano").append(k);
+  }
+})();
+
+// ── Static controls ─────────────────────────────────────────────────────────
+$("src-midi").onclick = () => send({ cmd: "input", audio: false });
+$("src-audio").onclick = () => send({ cmd: "input", audio: true });
+$("hud").onchange = (e) => send({ cmd: "hud", on: e.target.checked });
+$("source").onchange = (e) => send({ cmd: "source", name: e.target.value || null });
+$("gate").oninput = (e) => {
+  touch("gate");
+  const db = Number(e.target.value);
+  showGate(db);
+  sendSoon("gate", { cmd: "gate", db });
+};
+$("save-form").onsubmit = (e) => {
+  e.preventDefault();
+  const name = $("save-name").value.trim();
+  if (!name) return;
+  send({ cmd: "save_preset", name });
+  $("save-name").value = "";
+};
+$("log-clear").onclick = () => $("log").replaceChildren();
+
+const pct = (db) => Math.max(0, Math.min(1, (db - GATE_MIN) / (GATE_MAX - GATE_MIN))) * 100;
+function showGate(db) {
+  $("meter-gate").style.left = `calc(${pct(db)}% - 1px)`;
+  $("gate-val").textContent = `${Math.round(db)} dB`;
+}
+
+// ── Render ──────────────────────────────────────────────────────────────────
+function render(s, sources) {
+  const sketch = s.sketches[s.sketch] || "";
+  $("now-sketch").textContent = sketch;
+  $("now-fps").textContent = `${Math.round(s.fps)} fps`;
+  document.title = `${sketch} · midi-visuals`;
+  $("hud").checked = s.hud;
+
+  if (changed("sketches", [s.sketches, s.sketch])) {
+    $("sketches").replaceChildren(...s.sketches.map((name, i) =>
+      el("button", { class: i === s.sketch ? "active" : "", textContent: name, onclick: () => send({ cmd: "sketch", idx: i }) })));
+  }
+  if (changed("actions", [s.sketch, s.actions])) {
+    $("actions").replaceChildren(...s.actions.map((label, i) =>
+      el("button", { textContent: label, onclick: () => send({ cmd: "action", idx: i }) })));
+  }
+  $("info").textContent = s.info || "";
+
+  renderParams(s);
+  renderPresets(s);
+  renderNotes(s);
+  renderAudio(s, sources);
+}
+
+function renderParams(s) {
+  const box = $("params");
+  if (changed("params", [s.sketch, s.params.map((p) => [p.cc, p.name])])) {
+    $("knob-hint").textContent = s.params.length ? "a MIDI controller moves these too" : "";
+    box.replaceChildren(...(s.params.length ? s.params.map((p) => {
+      const key = "cc" + p.cc;
+      const range = el("input", { type: "range", min: 0, max: 127, step: 1, id: key });
+      range.setAttribute("aria-label", p.name);
+      range.addEventListener("input", () => {
+        touch(key);
+        $(key + "-val").textContent = fmt(p.min + (range.value / 127) * (p.max - p.min));
+        sendSoon(key, { cmd: "cc", cc: p.cc, value: range.value / 127 });
+      });
+      return el("div", { class: "param" },
+        el("div", { class: "name", title: p.name }, el("span", { class: "cc", textContent: "CC" + p.cc }), p.name),
+        range,
+        el("div", { class: "val", id: key + "-val" }));
+    }) : [el("div", { class: "empty", textContent: "This sketch has no knobs." })]));
+  }
+  for (const p of s.params) {
+    const key = "cc" + p.cc;
+    if (isTouched(key)) continue;
+    const r = $(key);
+    if (r) r.value = Math.round(p.raw * 127);
+    const v = $(key + "-val");
+    if (v) v.textContent = fmt(p.min + p.raw * (p.max - p.min));
+  }
+}
+
+const fmt = (v) => Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2);
+
+function renderPresets(s) {
+  if (!changed("presets", [s.sketch, s.presets, s.preset])) return;
+  const list = $("presets");
+  if (!s.presets.length) {
+    list.replaceChildren(el("li", { class: "empty", textContent: "No presets for this sketch yet." }));
+    return;
+  }
+  list.replaceChildren(...s.presets.map((name, i) => el("li", {},
+    el("button", { class: "load" + (i === s.preset ? " active" : ""), textContent: name, title: "Load " + name,
+      onclick: () => send({ cmd: "load_preset", idx: i }) }),
+    el("button", { class: "ghost", textContent: "✕", title: "Delete " + name,
+      onclick: () => { if (confirm(`Delete preset "${name}"?`)) send({ cmd: "delete_preset", idx: i }); } }))));
+}
+
+let lastNotes = [];
+function renderNotes(s) {
+  $("src-midi").classList.toggle("active", !s.audio_on);
+  $("src-audio").classList.toggle("active", s.audio_on);
+  $("act-dot").className = "dot" + (s.midi_active ? " on" : "");
+  $("act-label").textContent = s.midi_active ? "receiving" : "idle";
+  for (const n of lastNotes) keyEls.get(n)?.classList.remove("on");
+  for (const n of s.notes) keyEls.get(n)?.classList.add("on");
+  lastNotes = s.notes;
+  $("held").textContent = s.notes.length ? s.notes.map(noteName).join("  ") : "";
+  $("midi-port").textContent = s.midi_port
+    ? `MIDI port: ${s.midi_port}. Knobs always come from MIDI.`
+    : "No MIDI controller connected. Use the knob sliders on the left.";
+}
+
+function renderAudio(s, sources) {
+  // Source picker: monitors first, since visualising playback is the common case.
+  if (changed("sources", [sources, s.source])) {
+    const sel = $("source");
+    const groups = [
+      ["Playing on this computer", sources.filter((x) => x.monitor)],
+      ["Microphones and line inputs", sources.filter((x) => !x.monitor)],
+    ];
+    const opts = [el("option", { value: "", textContent: "System default input" })];
+    for (const [label, items] of groups) {
+      if (!items.length) continue;
+      const g = el("optgroup", { label });
+      for (const x of items) g.append(el("option", { value: x.name, textContent: x.description.replace(/^Monitor of /, "") }));
+      opts.push(g);
+    }
+    if (s.source && !sources.some((x) => x.name === s.source)) {
+      opts.push(el("option", { value: s.source, textContent: `${s.source} (not available)` }));
+    }
+    sel.replaceChildren(...opts);
+    sel.value = s.source || "";
+    $("source-hint").textContent = sources.length
+      ? "To visualise music you're playing, pick the output you're listening on under “Playing on this computer”."
+      : "Can't list sources (pactl not found). Choose a device with AUDIO_DEVICE=… when starting.";
+  }
+
+  if (changed("engines", [s.engines, s.engine])) {
+    $("engines").replaceChildren(...s.engines.map((name, i) =>
+      el("button", { class: i === s.engine ? "active" : "", onclick: () => send({ cmd: "engine", idx: i }) },
+        name, el("small", { textContent: ENGINE_INFO[name] || "" }))));
+  }
+
+  if (!isTouched("gate")) {
+    $("gate").value = s.gate_db;
+    showGate(s.gate_db);
+  }
+  const a = s.audio;
+  const level = a ? a.level_db : GATE_MIN;
+  $("meter-fill").style.width = pct(level) + "%";
+  $("meter-fill").classList.toggle("open", !!a && level > s.gate_db);
+
+  $("audio-stats").replaceChildren(...(a ? [
+    statEl("level", `${level.toFixed(0)} dB`),
+    statEl("cpu", `${Math.round(a.load * 100)}%`),
+    statEl("latency", `~${Math.round(a.latency_ms)} ms`),
+    // A chosen source already shows in the picker above.
+    ...(s.source ? [] : [statEl("device", a.device)]),
+  ] : []));
+  $("audio-off").textContent = s.audio_on ? "" : "Audio capture is off; notes come from MIDI. Switch to Audio above to listen.";
+  $("audio-error").textContent = (a && a.engine_error) || s.audio_error || "";
+}
+
+const statEl = (k, v) => el("span", {}, k + " ", el("b", { textContent: v }));
+
+function appendLog(lines) {
+  if (!lines.length) return;
+  const box = $("log");
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+  for (const l of lines) {
+    const t = new Date(l.ms).toLocaleTimeString([], { hour12: false });
+    box.append(el("li", { class: l.warn ? "warn" : "" }, el("time", { textContent: t }), l.text));
+    logSeq = Math.max(logSeq, l.seq);
+  }
+  while (box.children.length > 300) box.firstChild.remove();
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+function setOnline(on) {
+  if (on === online) return;
+  online = on;
+  document.body.classList.toggle("offline", !on);
+  $("conn-dot").className = "dot " + (on ? "on" : "bad");
+  $("conn").textContent = on ? "connected" : "app not running";
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/state?since=" + logSeq, { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    const data = await r.json();
+    if (boot !== null && data.boot !== boot) {
+      // The app restarted: its log starts over, and so does ours.
+      $("log").replaceChildren();
+      logSeq = 0;
+      boot = data.boot;
+      return poll();
+    }
+    boot = data.boot;
+    setOnline(true);
+    render(data.status, data.sources);
+    appendLog(data.log);
+  } catch (_) {
+    setOnline(false);
+  }
+  setTimeout(poll, online ? 100 : 1000);
+}
+poll();
+</script>
+</body>
+</html>

@@ -184,6 +184,10 @@ impl Sketch for Rings {
         Some(format!("{} rings{}", self.rings.len(), suffix))
     }
 
+    fn actions(&self) -> &[(Key, &'static str)] {
+        &[(Key::G, "Rain"), (Key::O, "Gravity"), (Key::K, "Push / pull"), (Key::R, "Clear")]
+    }
+
     fn key_pressed(&mut self, key: Key) {
         match key {
             Key::G => { self.rain = !self.rain; self.rain_accum = 0.0; }

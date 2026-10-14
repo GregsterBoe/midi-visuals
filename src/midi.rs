@@ -36,21 +36,22 @@ impl Default for MidiState {
     }
 }
 
-pub fn start() -> (Arc<Mutex<MidiState>>, Option<MidiInputConnection<()>>) {
+/// Connects the first hardware MIDI input. Also returns the port's name.
+pub fn start() -> (Arc<Mutex<MidiState>>, Option<MidiInputConnection<()>>, Option<String>) {
     let state = Arc::new(Mutex::new(MidiState::default()));
 
     let midi_in = match MidiInput::new("midi-visuals") {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("Failed to create MIDI input: {e}. Continuing without MIDI.");
-            return (state, None);
+            log_warn!("Failed to create MIDI input: {e}. Continuing without MIDI.");
+            return (state, None, None);
         }
     };
 
     let ports = midi_in.ports();
     if ports.is_empty() {
-        println!("No MIDI ports found. Continuing without MIDI.");
-        return (state, None);
+        log_info!("No MIDI ports found. Continuing without MIDI.");
+        return (state, None, None);
     }
 
     // Prefer a real hardware port over the Linux "Midi Through" virtual loopback.
@@ -67,7 +68,7 @@ pub fn start() -> (Arc<Mutex<MidiState>>, Option<MidiInputConnection<()>>) {
     let port_name = midi_in
         .port_name(port)
         .unwrap_or_else(|_| "unknown".to_string());
-    println!("Connecting to MIDI port: {port_name}");
+    log_info!("Connecting to MIDI port: {port_name}");
 
     let state_clone = Arc::clone(&state);
     let conn = midi_in.connect(
@@ -112,10 +113,10 @@ pub fn start() -> (Arc<Mutex<MidiState>>, Option<MidiInputConnection<()>>) {
     );
 
     match conn {
-        Ok(c) => (state, Some(c)),
+        Ok(c) => (state, Some(c), Some(port_name)),
         Err(e) => {
-            eprintln!("Failed to connect to MIDI port: {e}. Continuing without MIDI.");
-            (state, None)
+            log_warn!("Failed to connect to MIDI port: {e}. Continuing without MIDI.");
+            (state, None, None)
         }
     }
 }

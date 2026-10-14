@@ -1559,6 +1559,10 @@ impl Sketch for Chess {
         ))
     }
 
+    fn actions(&self) -> &[(Key, &'static str)] {
+        &[(Key::R, "Reset board")]
+    }
+
     fn key_pressed(&mut self, key: Key) {
         if key == Key::R {
             self.cascade_queue = None;

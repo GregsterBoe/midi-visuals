@@ -8,6 +8,7 @@
 mod basic_pitch;
 mod dsp_poly;
 pub mod probe;
+pub mod pulse;
 mod resample;
 mod swift_f0;
 mod tracker;
@@ -104,22 +105,42 @@ impl Control {
 pub struct AudioInput {
     pub state: Arc<Mutex<AudioState>>,
     control: Arc<Control>,
+    /// Device or source name being captured.
+    pub device: String,
+    /// True when opened through `pulse`, so `set_source` can move the stream.
+    moving: bool,
     _stream: cpal::Stream,
 }
 
 impl AudioInput {
-    /// Opens the input named by `AUDIO_DEVICE` (substring match) or the default
-    /// input. `AUDIO_CHANNEL` (1-based) picks one channel instead of the mix.
-    pub fn start(engine: usize, gate_db: f32) -> Result<Self, String> {
+    /// Opens `source` (a PipeWire/Pulse source name) through the ALSA `pulse`
+    /// device when given, else the input named by `AUDIO_DEVICE` (substring
+    /// match) or the default input. `AUDIO_CHANNEL` (1-based) picks one channel
+    /// instead of the mix.
+    pub fn start(engine: usize, gate_db: f32, source: Option<&str>) -> Result<Self, String> {
         let host = cpal::default_host();
-        let wanted = std::env::var("AUDIO_DEVICE").ok();
-        let device = match &wanted {
-            Some(w) => host
+        let find = |w: &str, exact: bool| -> Result<Option<cpal::Device>, String> {
+            Ok(host
                 .input_devices()
                 .map_err(|e| e.to_string())?
-                .find(|d| d.name().map(|n| n.contains(w.as_str())).unwrap_or(false))
-                .ok_or_else(|| format!("no input device matching AUDIO_DEVICE='{w}'"))?,
-            None => host.default_input_device().ok_or("no default audio input device")?,
+                .find(|d| d.name().map(|n| if exact { n == w } else { n.contains(w) }).unwrap_or(false)))
+        };
+        let pulse = match source {
+            Some(_) => {
+                let d = find("pulse", true)?;
+                if d.is_none() {
+                    log_warn!("No ALSA 'pulse' device, so the chosen source can't be used. Using the default input.");
+                }
+                d
+            }
+            None => None,
+        };
+        let moving = pulse.is_some();
+        let wanted = std::env::var("AUDIO_DEVICE").ok();
+        let device = match (pulse, &wanted) {
+            (Some(d), _) => d,
+            (None, Some(w)) => find(w, false)?.ok_or_else(|| format!("no input device matching AUDIO_DEVICE='{w}'"))?,
+            (None, None) => host.default_input_device().ok_or("no default audio input device")?,
         };
         if let Ok(devs) = host.input_devices() {
             let names: Vec<String> = devs.filter_map(|d| d.name().ok()).collect();
@@ -133,7 +154,7 @@ impl AudioInput {
             .ok()
             .and_then(|c| c.parse::<usize>().ok())
             .map(|c| c.clamp(1, channels) - 1);
-        println!(
+        log_info!(
             "Audio input: {device_name} ({rate} Hz, {channels} ch, {:?}){}",
             config.sample_format(),
             channel.map_or(String::new(), |c| format!(", using channel {}", c + 1))
@@ -149,6 +170,9 @@ impl AudioInput {
             f => return Err(format!("unsupported sample format {f:?}")),
         }?;
         stream.play().map_err(|e| e.to_string())?;
+        if let (true, Some(src)) = (moving, source) {
+            move_to_source(src);
+        }
 
         let state = Arc::new(Mutex::new(AudioState { engine, ..Default::default() }));
         let control = Arc::new(Control {
@@ -161,17 +185,38 @@ impl AudioInput {
             .spawn(move || worker(rx, rate, st, ctl))
             .map_err(|e| e.to_string())?;
 
-        Ok(Self { state, control, _stream: stream })
+        let device = source.filter(|_| moving).map_or(device_name, str::to_string);
+        Ok(Self { state, control, device, moving, _stream: stream })
+    }
+
+    /// Switches a stream opened on a source to another one without restarting.
+    /// Returns false when the stream isn't on the `pulse` device.
+    pub fn set_source(&mut self, source: &str) -> bool {
+        if !self.moving {
+            return false;
+        }
+        self.device = source.to_string();
+        move_to_source(source);
+        true
     }
 
     pub fn set_engine(&self, idx: usize) { self.control.engine.store(idx % ENGINES.len(), Ordering::Relaxed); }
 
     pub fn gate_db(&self) -> f32 { self.control.gate_db() }
 
-    pub fn adjust_gate(&self, delta_db: f32) {
-        let g = (self.gate_db() + delta_db).clamp(-90.0, -6.0);
-        self.control.gate_db_bits.store(g.to_bits(), Ordering::Relaxed);
+    pub fn set_gate(&self, db: f32) {
+        self.control.gate_db_bits.store(db.clamp(-90.0, -6.0).to_bits(), Ordering::Relaxed);
     }
+}
+
+/// Moves the stream in the background: it has to register with the sound
+/// server first, and the render thread shouldn't wait for that.
+fn move_to_source(source: &str) {
+    let source = source.to_string();
+    std::thread::spawn(move || match pulse::move_to(&source) {
+        Ok(()) => log_info!("Audio source: {source}"),
+        Err(e) => log_warn!("Couldn't switch audio source: {e}"),
+    });
 }
 
 fn build_stream<T>(
@@ -199,7 +244,7 @@ where
                 // If the worker falls behind, drop audio rather than block capture.
                 let _ = tx.try_send(mono);
             },
-            |e| eprintln!("Audio input error: {e}"),
+            |e| log_warn!("Audio input error: {e}"),
             None,
         )
         .map_err(|e| e.to_string())
@@ -234,7 +279,7 @@ fn worker(rx: Receiver<Vec<f32>>, in_rate: u32, state: Arc<Mutex<AudioState>>, c
             s.engine = want;
             match built {
                 Ok(e) => {
-                    println!("Audio engine: {}  (~{:.0} ms latency)", e.name(), e.latency_ms());
+                    log_info!("Audio engine: {}  (~{:.0} ms latency)", e.name(), e.latency_ms());
                     resampler = Resampler::new(in_rate, e.sample_rate());
                     tracker = Tracker::new(e.tracker());
                     s.latency_ms = e.latency_ms();
@@ -242,7 +287,7 @@ fn worker(rx: Receiver<Vec<f32>>, in_rate: u32, state: Arc<Mutex<AudioState>>, c
                     engine = Some(e);
                 }
                 Err(err) => {
-                    eprintln!("Audio engine {} unavailable: {err}", ENGINES[want]);
+                    log_warn!("Audio engine {} unavailable: {err}", ENGINES[want]);
                     s.engine_error = Some(err);
                     engine = None;
                 }

@@ -640,6 +640,10 @@ impl Sketch for Mandala {
             self.chord.label(), self.energy * 100.0, self.tension * 100.0, a, b))
     }
 
+    fn actions(&self) -> &[(Key, &'static str)] {
+        &[(Key::R, "Reset")]
+    }
+
     fn key_pressed(&mut self, key: Key) {
         if key == Key::R { *self = Self::new(); }
     }
