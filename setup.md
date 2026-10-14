@@ -193,7 +193,7 @@ midi-visuals/
       dsp_poly.rs    ← DSP multi-pitch engine (no model)
       probe.rs       ← --probe (WAV) and --listen (live) terminal tools
       pulse.rs       ← PipeWire/Pulse source listing and live switching via pactl
-    presets.rs       ← preset save/load (presets/<sketch>.txt), audio settings (presets/audio.json)
+    presets.rs       ← preset save/load (presets/<sketch>.txt), audio settings (presets/audio.json), controller layout (presets/controller.json)
     sketches/
       mod.rs         ← Sketch trait, Param struct, registry
       aurora.rs      ← MIDI-reactive aurora bands

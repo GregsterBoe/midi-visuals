@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 use crate::audio::pulse::{self, Source};
+use crate::midi::Control;
+use crate::presets::ControllerLayout;
 
 const PAGE: &str = include_str!("../assets/panel.html");
 pub const DEFAULT_PORT: u16 = 7878;
@@ -78,6 +80,11 @@ pub enum Command {
     Source { name: Option<String> },
     /// A knob value in [0, 1], as a MIDI controller would send it.
     Cc { cc: u8, value: f32 },
+    /// The pitch wheel, in [0, 1] with 0.5 at rest.
+    Bend { value: f32 },
+    /// Puts a control in a controller slot (wheels first, then knobs).
+    Assign { slot: usize, control: Control },
+    ResetLayout,
     LoadPreset { idx: usize },
     SavePreset { name: String },
     DeletePreset { idx: usize },
@@ -91,6 +98,14 @@ pub struct Status {
     pub info: Option<String>,
     pub actions: Vec<&'static str>,
     pub params: Vec<ParamStatus>,
+    pub layout: ControllerLayout,
+    /// Every CC's position in [0, 1], so unused knobs move on the page too.
+    pub ccs: Vec<f32>,
+    pub pitch_bend: f32,
+    pub last_control: Option<Control>,
+    pub control_moves: u64,
+    /// The knob that scrolls through presets.
+    pub scroll_cc: u8,
     pub presets: Vec<String>,
     pub preset: usize,
     pub hud: bool,

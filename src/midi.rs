@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use midir::{MidiInput, MidiInputConnection};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Default)]
 pub struct NoteState {
@@ -17,12 +18,24 @@ pub struct NoteEvent {
     pub on: bool,
 }
 
+/// A physical control on the controller, as it shows up in MIDI.
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Control {
+    Cc(u8),
+    PitchBend,
+}
+
 #[derive(Clone)]
 pub struct MidiState {
     pub ccs: [f32; 128],
     pub notes: [NoteState; 128],
     pub recent_events: VecDeque<NoteEvent>,
     pub pitch_bend: f32,
+    /// The control the hardware moved last, and a count of all moves so far,
+    /// which lets the panel tell a new move from an old one.
+    pub last_control: Option<Control>,
+    pub control_moves: u64,
 }
 
 impl Default for MidiState {
@@ -32,6 +45,8 @@ impl Default for MidiState {
             notes: [NoteState::default(); 128],
             recent_events: VecDeque::with_capacity(64),
             pitch_bend: 0.5,
+            last_control: None,
+            control_moves: 0,
         }
     }
 }
@@ -85,11 +100,15 @@ pub fn start() -> (Arc<Mutex<MidiState>>, Option<MidiInputConnection<()>>, Optio
             match status & 0xF0 {
                 0xB0 => {
                     s.ccs[b1] = b2 as f32 / 127.0;
+                    s.last_control = Some(Control::Cc(b1 as u8));
+                    s.control_moves += 1;
                 }
                 0xE0 => {
                     // 14-bit pitch bend: message[1]=LSB, message[2]=MSB, range 0-16383
                     let raw = ((b2 as u16) << 7) | (b1 as u16);
                     s.pitch_bend = raw as f32 / 16383.0;
+                    s.last_control = Some(Control::PitchBend);
+                    s.control_moves += 1;
                 }
                 0x90 => {
                     let on = b2 > 0;

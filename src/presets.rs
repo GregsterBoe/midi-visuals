@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use crate::midi::Control;
+
 /// CC number for the knob that scrolls through presets. Change this to match
 /// your controller's last/scroll knob.
 pub const SCROLL_CC: u8 = 31;
@@ -99,5 +101,50 @@ impl AudioSettings {
         if let Ok(text) = serde_json::to_string_pretty(self) {
             let _ = fs::write(AUDIO_SETTINGS, text);
         }
+    }
+}
+
+/// Which MIDI control sits where on the controller, so the panel can draw
+/// it. Defaults to the MPK mini: two wheels left of the pads, then two rows of
+/// four knobs. Slots are re-learned from the panel when they don't match.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ControllerLayout {
+    pub wheels: Vec<Control>,
+    pub knobs: Vec<Control>,
+}
+
+impl Default for ControllerLayout {
+    fn default() -> Self {
+        Self { wheels: vec![Control::PitchBend, Control::Cc(1)], knobs: (24..=31).map(Control::Cc).collect() }
+    }
+}
+
+const CONTROLLER_LAYOUT: &str = "presets/controller.json";
+
+impl ControllerLayout {
+    pub fn load() -> Self {
+        fs::read_to_string(CONTROLLER_LAYOUT)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self) {
+        let _ = fs::create_dir_all("presets");
+        if let Ok(text) = serde_json::to_string_pretty(self) {
+            let _ = fs::write(CONTROLLER_LAYOUT, text);
+        }
+    }
+
+    /// Puts `control` in a slot (wheels first, then knobs). If another slot
+    /// had it, that slot takes this one's old control, so nothing is lost.
+    pub fn assign(&mut self, slot: usize, control: Control) {
+        let mut slots: Vec<&mut Control> = self.wheels.iter_mut().chain(self.knobs.iter_mut()).collect();
+        let Some(old) = slots.get(slot).map(|c| **c) else { return };
+        if let Some(other) = slots.iter_mut().find(|c| ***c == control) {
+            **other = old;
+        }
+        *slots[slot] = control;
     }
 }

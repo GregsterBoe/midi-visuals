@@ -6,10 +6,10 @@ mod presets;
 mod sketches;
 
 use audio::AudioInput;
-use midi::{MidiState, NoteEvent, NoteState};
+use midi::{MidiState, NoteEvent};
 use midir::MidiInputConnection;
 use nannou::prelude::*;
-use presets::{AudioSettings, PresetStore};
+use presets::{AudioSettings, ControllerLayout, PresetStore};
 use sketches::{registry, Sketch, SketchFactory};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -85,6 +85,8 @@ struct Model {
     last_notes_on: [bool; 128],
     midi_port: Option<String>,
     panel: Option<Panel>,
+    /// Where each control sits on the controller, for the panel's drawing.
+    layout: ControllerLayout,
     fps: f32,
 }
 
@@ -170,6 +172,7 @@ fn model(app: &App) -> Model {
         last_notes_on: [false; 128],
         midi_port,
         panel,
+        layout: ControllerLayout::load(),
         fps: 0.0,
     };
     if args.iter().any(|a| a == "--audio") {
@@ -303,6 +306,15 @@ impl Model {
                     *v = value.clamp(0.0, 1.0);
                 }
             }
+            Command::Bend { value } => self.midi_state.lock().unwrap().pitch_bend = value.clamp(0.0, 1.0),
+            Command::Assign { slot, control } => {
+                self.layout.assign(slot, control);
+                self.layout.save();
+            }
+            Command::ResetLayout => {
+                self.layout = ControllerLayout::default();
+                self.layout.save();
+            }
             Command::LoadPreset { idx } => self.load_preset(idx),
             Command::SavePreset { name } => self.save_preset(&name),
             Command::DeletePreset { idx } => {
@@ -317,7 +329,7 @@ impl Model {
         }
     }
 
-    fn publish_status(&self, notes: &[NoteState; 128]) {
+    fn publish_status(&self, midi: &MidiState) {
         let Some(panel) = &self.panel else { return };
         let audio = self.audio.as_ref().map(|a| {
             let s = a.state.lock().unwrap();
@@ -337,6 +349,12 @@ impl Model {
             params: self.active.params().iter()
                 .map(|p| ParamStatus { cc: p.cc, name: p.name, min: p.min, max: p.max, raw: self.prev_ccs[p.cc as usize] })
                 .collect(),
+            layout: self.layout.clone(),
+            ccs: self.prev_ccs.to_vec(),
+            pitch_bend: midi.pitch_bend,
+            last_control: midi.last_control,
+            control_moves: midi.control_moves,
+            scroll_cc: presets::SCROLL_CC,
             presets: self.presets.list.iter().map(|p| p.name.clone()).collect(),
             preset: self.preset_idx,
             hud: self.show_hud,
@@ -344,7 +362,7 @@ impl Model {
             audio_on: self.input == InputSource::Audio,
             midi_port: self.midi_port.clone(),
             midi_active: self.last_midi_t.elapsed() < Duration::from_millis(500),
-            notes: (0..128u8).filter(|&n| notes[n as usize].on).collect(),
+            notes: (0..128u8).filter(|&n| midi.notes[n as usize].on).collect(),
             engines: audio::ENGINES.to_vec(),
             engine: self.audio_engine,
             gate_db: self.audio_gate_db,
@@ -487,7 +505,7 @@ fn update(app: &App, model: &mut Model, update: Update) {
     }
 
     model.active.update(&midi_snapshot, dt);
-    model.publish_status(&midi_snapshot.notes);
+    model.publish_status(&midi_snapshot);
 }
 
 /// HUD lines describing the note source: [A] toggles, [E] cycles engines, [-]/[=] gate.

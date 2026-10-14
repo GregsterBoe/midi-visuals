@@ -17,7 +17,10 @@ While the app runs, it serves a control panel at <http://127.0.0.1:7878>. Press 
 window to open it in the browser, or start with `--open`. From the panel you can:
 
 - switch sketches and trigger their actions (reset, colour mode, rain, …)
-- move every knob of the active sketch with a slider, so a MIDI controller is optional
+- see and turn the knobs and wheels where they sit on the MPK mini, labelled with what they
+  do in the active sketch, so a MIDI controller is optional. If a control on the page doesn't
+  match the hardware, click its CC label and move the real control to re-map it (saved in
+  `presets/controller.json`; "reset layout" restores the defaults)
 - load, save and delete presets
 - switch notes between MIDI and audio, pick the audio source and pitch engine, and set the
   noise gate on a live level meter

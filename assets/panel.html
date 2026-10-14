@@ -127,6 +127,43 @@
   .param .val { text-align: right; font-family: var(--mono); font-size: 12px; color: var(--dim); }
   @media (max-width: 480px) { .param { grid-template-columns: 110px minmax(0, 1fr) 52px; gap: 8px; } }
   input[type=range] { width: 100%; accent-color: var(--accent); }
+  .extra-title { color: var(--faint); font-size: 12px; margin: 16px 0 4px; }
+
+  /* The controller, laid out like the MPK mini: wheels left, 2 x 4 knobs right. */
+  .mpk { display: flex; gap: 14px; padding: 14px 12px 10px; border-radius: 9px; background: #12141a; border: 1px solid var(--line); }
+  .wheels { display: flex; gap: 8px; padding-right: 14px; border-right: 1px solid var(--line); }
+  .knobs { flex: 1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 6px; min-width: 0; }
+  .ctl { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 0; text-align: center; }
+  .ctl .name { font-size: 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 4px; }
+  .ctl.unused .name { color: var(--faint); font-style: italic; }
+  .ctl .val { font-family: var(--mono); font-size: 11px; color: var(--dim); min-height: 15px; }
+  .ctl .tag { font-family: var(--mono); font-size: 10px; color: var(--faint); background: transparent; border: 1px dashed transparent; padding: 1px 5px; border-radius: 5px; }
+  .ctl .tag:hover { border-color: var(--faint); color: var(--dim); }
+  .ctl .tag.learning { color: var(--warn); border-color: var(--warn); animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .45; } }
+  .dial { width: 100%; max-width: 64px; aspect-ratio: 1; cursor: ns-resize; touch-action: none; border-radius: 50%; }
+  .dial svg { display: block; width: 100%; height: 100%; overflow: visible; }
+  .dial .face { fill: #262a35; stroke: #343947; stroke-width: 1.5; }
+  .dial .track { fill: none; stroke: #2b2f3b; stroke-width: 4; stroke-linecap: round; }
+  .dial .arc { fill: none; stroke: var(--accent); stroke-width: 4; stroke-linecap: round; }
+  .dial .ptr { stroke: var(--text); stroke-width: 3; stroke-linecap: round; }
+  .unused .dial .arc { stroke: var(--faint); }
+  .slot { position: relative; width: 38px; height: 132px; border-radius: 8px; background: #0b0c10; border: 1px solid #343947; cursor: ns-resize; touch-action: none; }
+  .slot .mid { position: absolute; left: 4px; right: 4px; top: 50%; border-top: 1px dashed #343947; }
+  .slot .thumb { position: absolute; left: 3px; right: 3px; height: 30px; border-radius: 6px;
+    background: repeating-linear-gradient(0deg, #4a5060 0 2px, #333846 2px 5px); border: 1px solid #5b6070; }
+  .slot .fill { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 0 0 7px 7px; background: rgba(124, 156, 255, 0.18); }
+  .ctl.hit .dial .face, .ctl.hit .slot { stroke: var(--good); border-color: var(--good); box-shadow: 0 0 10px rgba(76, 209, 138, .35); }
+  .dial:focus-visible, .slot:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .layout-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .layout-row .hint { margin: 0; flex: 1; }
+  @media (max-width: 480px) {
+    .mpk { gap: 8px; padding: 12px 8px 8px; }
+    .wheels { gap: 5px; padding-right: 8px; }
+    .slot { width: 30px; height: 112px; }
+    .knobs { gap: 10px 2px; }
+    .ctl .name { font-size: 11px; }
+  }
 
   .presets { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow: auto; }
   .presets li { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
@@ -170,12 +207,20 @@
     </section>
 
     <section>
-      <h2>Knobs <span class="side hint" id="knob-hint"></span></h2>
+      <h2>Controller <span class="side hint" id="last-moved"></span></h2>
+      <div class="mpk">
+        <div class="wheels" id="wheels"></div>
+        <div class="knobs" id="knobs"></div>
+      </div>
+      <div class="layout-row">
+        <p class="hint" id="learn-hint">Drag a knob up or down to turn it. If a knob here doesn't match your MPK, click its CC label and move the real one.</p>
+        <button class="ghost" id="layout-reset" title="Back to the MPK mini defaults">reset layout</button>
+      </div>
       <div id="params"></div>
     </section>
 
     <section>
-      <h2>Presets <span class="side hint">CC 31 scrolls them too</span></h2>
+      <h2>Presets <span class="side hint" id="preset-hint"></span></h2>
       <ul class="presets" id="presets"></ul>
       <form class="save" id="save-form">
         <input type="text" id="save-name" placeholder="Save current knobs as…" maxlength="60">
@@ -336,7 +381,9 @@ function showGate(db) {
 }
 
 // ── Render ──────────────────────────────────────────────────────────────────
+let lastState = null;
 function render(s, sources) {
+  lastState = s;
   const sketch = s.sketches[s.sketch] || "";
   $("now-sketch").textContent = sketch;
   $("now-fps").textContent = `${Math.round(s.fps)} fps`;
@@ -353,17 +400,20 @@ function render(s, sources) {
   }
   $("info").textContent = s.info || "";
 
+  renderController(s);
   renderParams(s);
   renderPresets(s);
   renderNotes(s);
   renderAudio(s, sources);
 }
 
+// Sketch knobs whose CC sits on no control of the layout, as plain sliders.
 function renderParams(s) {
   const box = $("params");
-  if (changed("params", [s.sketch, s.params.map((p) => [p.cc, p.name])])) {
-    $("knob-hint").textContent = s.params.length ? "a MIDI controller moves these too" : "";
-    box.replaceChildren(...(s.params.length ? s.params.map((p) => {
+  const onLayout = new Set([...s.layout.wheels, ...s.layout.knobs].filter((c) => c.cc !== undefined).map((c) => c.cc));
+  const extra = s.params.filter((p) => !onLayout.has(p.cc));
+  if (changed("params", [s.sketch, extra.map((p) => [p.cc, p.name])])) {
+    box.replaceChildren(...(extra.length ? [el("div", { class: "extra-title", textContent: "Not on the controller" }), ...extra.map((p) => {
       const key = "cc" + p.cc;
       const range = el("input", { type: "range", min: 0, max: 127, step: 1, id: key });
       range.setAttribute("aria-label", p.name);
@@ -376,9 +426,9 @@ function renderParams(s) {
         el("div", { class: "name", title: p.name }, el("span", { class: "cc", textContent: "CC" + p.cc }), p.name),
         range,
         el("div", { class: "val", id: key + "-val" }));
-    }) : [el("div", { class: "empty", textContent: "This sketch has no knobs." })]));
+    })] : []));
   }
-  for (const p of s.params) {
+  for (const p of extra) {
     const key = "cc" + p.cc;
     if (isTouched(key)) continue;
     const r = $(key);
@@ -387,6 +437,177 @@ function renderParams(s) {
     if (v) v.textContent = fmt(p.min + p.raw * (p.max - p.min));
   }
 }
+
+// ── Controller ──────────────────────────────────────────────────────────────
+const ctlKey = (c) => c === "pitch_bend" ? "pb" : "cc" + c.cc;
+const ctlLabel = (c) => c === "pitch_bend" ? "Pitch" : "CC" + c.cc;
+const ctlValue = (s, c) => c === "pitch_bend" ? s.pitch_bend : (s.ccs[c.cc] ?? 0);
+let ctlEls = [];          // per slot: { control, set(v), root }
+let learnSlot = null;     // slot waiting for the next hardware move
+let learnFrom = 0;        // control_moves when learning started
+let lastMoves = null;
+const local = new Map();  // values the page set itself, shown while touched
+
+function setControl(c, v) {
+  v = Math.max(0, Math.min(1, v));
+  const key = ctlKey(c);
+  touch(key);
+  local.set(key, v);
+  sendSoon(key, c === "pitch_bend" ? { cmd: "bend", value: v } : { cmd: "cc", cc: c.cc, value: v });
+  for (const e of ctlEls) if (ctlKey(e.control) === key) e.set(v);
+}
+
+// Drag up/down (relative, like a DAW knob), mouse wheel and arrow keys.
+function makeDraggable(target, getC, span, springBack) {
+  let startY = 0, startV = 0;
+  target.addEventListener("pointerdown", (e) => {
+    target.setPointerCapture(e.pointerId);
+    startY = e.clientY;
+    startV = local.get(ctlKey(getC())) ?? target._v ?? 0;
+    e.preventDefault();
+    target.focus();
+  });
+  target.addEventListener("pointermove", (e) => {
+    if (!target.hasPointerCapture(e.pointerId)) return;
+    setControl(getC(), startV + (startY - e.clientY) / span());
+  });
+  const release = () => { if (springBack()) setControl(getC(), 0.5); };
+  target.addEventListener("pointerup", release);
+  target.addEventListener("pointercancel", release);
+  target.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    setControl(getC(), (target._v ?? 0) + (e.deltaY < 0 ? 2 : -2) / 127);
+  }, { passive: false });
+  target.addEventListener("keydown", (e) => {
+    const step = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1, PageUp: 10, PageDown: -10 }[e.key];
+    if (!step) return;
+    e.preventDefault();
+    setControl(getC(), (target._v ?? 0) + step / 127);
+  });
+}
+
+const SVG = "http://www.w3.org/2000/svg";
+function svg(tag, attrs) {
+  const e = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  return e;
+}
+// A 270° arc from 7:30 round to 4:30, the travel of a real knob.
+function arcPath(r) {
+  const p = (deg) => { const a = (deg - 90) * Math.PI / 180; return `${32 + r * Math.cos(a)} ${32 + r * Math.sin(a)}`; };
+  return `M ${p(-135)} A ${r} ${r} 0 1 1 ${p(135)}`;
+}
+
+function buildKnob(slot, c, label) {
+  const track = svg("path", { d: arcPath(29), class: "track" });
+  const arc = svg("path", { d: arcPath(29), class: "arc", pathLength: 100 });
+  const ptr = svg("line", { x1: 32, y1: 30, x2: 32, y2: 12, class: "ptr" });
+  const face = svg("circle", { cx: 32, cy: 32, r: 23, class: "face" });
+  const s = svg("svg", { viewBox: "0 0 64 64" });
+  s.append(track, arc, face, ptr);
+  const dial = el("div", { class: "dial", tabIndex: 0 }, s);
+  dial.setAttribute("role", "slider");
+  dial.setAttribute("aria-label", label);
+  const set = (v) => {
+    dial._v = v;
+    arc.setAttribute("stroke-dasharray", `${v * 100} 100`);
+    ptr.setAttribute("transform", `rotate(${-135 + v * 270} 32 32)`);
+    dial.setAttribute("aria-valuenow", Math.round(v * 127));
+  };
+  makeDraggable(dial, () => c, () => 160, () => false);
+  return { dial, set };
+}
+
+function buildWheel(slot, c, label) {
+  const thumb = el("div", { class: "thumb" });
+  const fill = el("div", { class: "fill" });
+  const box = el("div", { class: "slot", tabIndex: 0 }, fill, el("div", { class: "mid" }), thumb);
+  box.setAttribute("role", "slider");
+  box.setAttribute("aria-label", label);
+  const set = (v) => {
+    box._v = v;
+    const h = box.clientHeight || 132;
+    thumb.style.bottom = `${v * (h - 34)}px`;
+    fill.style.height = c === "pitch_bend" ? "0" : `${v * 100}%`;
+    box.setAttribute("aria-valuenow", Math.round(v * 127));
+  };
+  // The pitch wheel springs back to the middle like the real one.
+  makeDraggable(box, () => c, () => (box.clientHeight || 132) - 34, () => c === "pitch_bend");
+  return { dial: box, set };
+}
+
+// What a control does in the active sketch: its knob name and scaled value.
+function describe(s, c) {
+  if (c === "pitch_bend") {
+    const used = s.sketches[s.sketch] === "cardano";
+    return { name: used ? "hue 2" : "pitch bend", used, fmt: (v) => (v >= 0.5 ? "+" : "") + ((v - 0.5) * 2).toFixed(2) };
+  }
+  const p = s.params.find((p) => p.cc === c.cc);
+  if (p) return { name: p.name, used: true, fmt: (v) => fmt(p.min + v * (p.max - p.min)) };
+  if (c.cc === s.scroll_cc) return { name: "presets", used: true, fmt: () => s.presets.length ? `${s.preset + 1}/${s.presets.length}` : "none" };
+  return { name: "unused", used: false, fmt: (v) => String(Math.round(v * 127)) };
+}
+
+function renderController(s) {
+  const slots = [...s.layout.wheels, ...s.layout.knobs];
+  if (changed("ctl", [s.sketch, s.layout, s.params.map((p) => [p.cc, p.name]), s.presets.length, s.preset])) {
+    ctlEls = slots.map((c, i) => {
+      const d = describe(s, c);
+      const wheel = i < s.layout.wheels.length;
+      const n = wheel ? i + 1 : i - s.layout.wheels.length + 1;
+      const label = `${wheel ? "Wheel" : "Knob"} ${n}: ${d.name}`;
+      const { dial, set } = wheel ? buildWheel(i, c, label) : buildKnob(i, c, label);
+      const val = el("div", { class: "val" });
+      const tag = el("button", {
+        class: "tag" + (learnSlot === i ? " learning" : ""),
+        textContent: learnSlot === i ? "move…" : ctlLabel(c),
+        title: "Re-map: click, then move the matching control on the MPK",
+        onclick: () => startLearn(learnSlot === i ? null : i),
+      });
+      const root = el("div", { class: "ctl" + (d.used ? "" : " unused") }, dial,
+        el("div", { class: "name", textContent: d.name, title: d.name }), val, tag);
+      return { control: c, root, set: (v) => { set(v); val.textContent = d.fmt(v); } };
+    });
+    const nw = s.layout.wheels.length;
+    $("wheels").replaceChildren(...ctlEls.slice(0, nw).map((e) => e.root));
+    $("knobs").replaceChildren(...ctlEls.slice(nw).map((e) => e.root));
+    const scroll = s.layout.knobs.findIndex((c) => c.cc === s.scroll_cc);
+    $("preset-hint").textContent = scroll >= 0 ? `knob ${scroll + 1} scrolls them too` : `CC ${s.scroll_cc} scrolls them too`;
+  }
+  for (const e of ctlEls) {
+    const key = ctlKey(e.control);
+    e.set(isTouched(key) ? local.get(key) : ctlValue(s, e.control));
+  }
+
+  // Hardware moves: flash the control, show it, and finish a pending re-map.
+  const moved = s.last_control && lastMoves !== null && s.control_moves > lastMoves;
+  lastMoves = s.control_moves;
+  if (moved) {
+    $("last-moved").textContent = `last moved: ${ctlLabel(s.last_control)}`;
+    const hit = ctlEls.find((e) => ctlKey(e.control) === ctlKey(s.last_control));
+    if (hit) {
+      hit.root.classList.add("hit");
+      clearTimeout(hit.root._hit);
+      hit.root._hit = setTimeout(() => hit.root.classList.remove("hit"), 300);
+    }
+    if (learnSlot !== null && s.control_moves > learnFrom) {
+      send({ cmd: "assign", slot: learnSlot, control: s.last_control });
+      startLearn(null);
+    }
+  }
+}
+
+function startLearn(slot) {
+  learnSlot = slot;
+  learnFrom = lastMoves ?? 0;
+  delete shown.ctl; // rebuild so the label shows the state
+  $("learn-hint").textContent = slot === null
+    ? "Drag a knob up or down to turn it. If a knob here doesn't match your MPK, click its CC label and move the real one."
+    : "Now move the control that sits in this spot on your MPK… (Esc cancels)";
+  if (lastState) renderController(lastState);
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && learnSlot !== null) startLearn(null); });
+$("layout-reset").onclick = () => { startLearn(null); send({ cmd: "reset_layout" }); };
 
 const fmt = (v) => Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2);
 
