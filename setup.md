@@ -19,6 +19,8 @@ Switching between sketches happens on the fly without bloating a single project.
 | Language | Rust |
 | Creative framework | Nannou 0.19 |
 | MIDI input | midir |
+| Audio input | cpal |
+| Pitch models | ONNX Runtime via `ort` (Basic Pitch, SwiftF0) |
 | GPU backend | wgpu (via Nannou) |
 | Editor | VS Code + rust-analyzer |
 
@@ -180,6 +182,14 @@ midi-visuals/
   src/
     main.rs          ← launcher, sketch switcher (Tab), HUD (H), preset system (S/Enter)
     midi.rs          ← shared MIDI input layer (midir)
+    audio/           ← audio note input (A toggles, E cycles engine)
+      mod.rs         ← cpal capture, worker thread, AudioState, engine registry
+      tracker.rs     ← per-frame note activations → note on/off events
+      resample.rs    ← streaming windowed-sinc resampler
+      basic_pitch.rs ← Basic Pitch engine (polyphonic, ONNX)
+      swift_f0.rs    ← SwiftF0 engine (monophonic, ONNX)
+      dsp_poly.rs    ← DSP multi-pitch engine (no model)
+      probe.rs       ← --probe (WAV) and --listen (live) terminal tools
     presets.rs       ← preset save/load (presets.txt)
     sketches/
       mod.rs         ← Sketch trait, Param struct, registry

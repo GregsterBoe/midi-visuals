@@ -7,3 +7,8 @@ edition = "2024"
 nannou = "0.19"
 midir = "0.9"
 bytemuck = { version = "1", features = ["derive"] }
+# cpal 0.17+ links alsa-sys 0.4, which conflicts with midir 0.9 (alsa-sys 0.3).
+cpal = "0.16"
+realfft = "3.5.0"
+ort = { version = "=2.0.0-rc.14", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-rustls", "api-22"] }
+hound = "3.5.1"

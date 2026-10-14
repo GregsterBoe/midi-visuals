@@ -126,7 +126,7 @@ impl MidiState {
     }
 }
 
-fn push_event(queue: &mut VecDeque<NoteEvent>, event: NoteEvent) {
+pub fn push_event(queue: &mut VecDeque<NoteEvent>, event: NoteEvent) {
     if queue.len() >= 64 {
         queue.pop_front();
     }

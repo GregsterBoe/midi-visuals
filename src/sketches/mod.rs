@@ -33,6 +33,35 @@ impl Param {
     }
 }
 
+/// First-order IIR low-pass filter for smooth audio/MIDI reactivity.
+///
+/// `rate` = 1/τ, so:
+///   rate 1.0 → 63% convergence per second  (very slow, buttery)
+///   rate 3.0 → 63% in ~333ms               (slow, good for chord hue/n_sym)
+///   rate 5.0 → 63% in 200ms                (snappy, good for CC knobs)
+///   rate 10.0 → 63% in 100ms               (fast, near-instant)
+///
+/// Use `drive()` each frame; `snap()` to hard-set with no lag (e.g. on reset).
+pub struct Smoothed {
+    pub value: f32,
+    pub rate:  f32,
+}
+
+impl Smoothed {
+    pub const fn new(value: f32, rate: f32) -> Self { Self { value, rate } }
+
+    /// Advance toward `target` by one frame and return the new value.
+    pub fn drive(&mut self, target: f32, dt: f32) -> f32 {
+        let alpha = 1.0 - (-self.rate * dt).exp();
+        self.value += alpha * (target - self.value);
+        self.value
+    }
+
+    /// Teleport to `value` with no smoothing lag.
+    #[allow(dead_code)]
+    pub fn snap(&mut self, value: f32) { self.value = value; }
+}
+
 pub trait Sketch {
     fn update(&mut self, midi: &MidiState, dt: f32);
     fn view(&self, draw: &Draw, win: Rect);

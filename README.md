@@ -19,9 +19,71 @@ cargo run -- rings
 | `H`   | Toggle the HUD overlay          |
 | `S`   | Save current knob state as preset (then type a name + Enter) |
 | `Enter` | Load selected preset          |
+| `A`   | Switch notes between MIDI and audio input |
+| `E`   | Cycle the audio pitch engine    |
+| `-` / `=` | Audio noise gate down / up 3 dB |
 
-The HUD (top-left) shows the active sketch name, current FPS, and a green dot that flashes on any MIDI input.
+The HUD (top-left) shows the active sketch name, current FPS, and a green dot that flashes on any note or knob input.
 Presets are saved per-sketch in `presets/<sketch_name>.txt`. CC 31 scrolls through saved presets.
+
+## Audio input
+
+Notes can come from a microphone or instrument instead of MIDI: press `A` (or start with
+`--audio`). Detected notes replace MIDI notes, so every sketch reacts to them as if they were
+played on the keyboard. CC knobs keep coming from the MIDI controller.
+
+```
+cargo run --release -- mandala --audio                    # start on audio input
+cargo run --release -- rings --audio --engine=swift-f0    # pick the engine
+AUDIO_DEVICE="USB Audio" AUDIO_CHANNEL=1 cargo run --release -- --audio   # pick device and channel
+```
+
+Three engines, cycled with `E`:
+
+| Engine | Polyphonic | Latency* | Best for | How |
+|---|---|---|---|---|
+| `basic-pitch` (default) | yes | ~100 ms | chords on any instrument | Spotify's [Basic Pitch](https://github.com/spotify/basic-pitch) model over a sliding 2 s window |
+| `swift-f0` | no | ~75 ms | voice, lead lines, bass | [SwiftF0](https://github.com/lars76/swift-f0) monophonic pitch model |
+| `dsp-poly` | yes | ~80–130 ms | no-model fallback, very low CPU | harmonic-sum multi-pitch with iterative cancellation |
+
+\*Median time from a note's start to its event, measured offline on rendered piano, guitar and
+flute clips. Accuracy on those clips: basic-pitch found 97% of chord notes, dsp-poly about 80%, and
+swift-f0 100% of melody notes. Basic Pitch uses about one CPU core; the others are negligible.
+
+The HUD shows the engine, input level, gate, CPU load and the currently detected notes. If
+notes trigger from background noise, raise the gate with `=`; if quiet playing is missed,
+lower it with `-`. The models are vendored in `assets/models/` (SwiftF0: MIT, Basic Pitch:
+Apache-2.0); the ONNX Runtime library is downloaded by the `ort` crate on the first build.
+
+### Choosing the input
+
+`AUDIO_DEVICE` only sees ALSA devices (`default`, `pulse`, `USB Audio`, …). To use any
+PipeWire/Pulse source, including the *monitor* of an output (to visualize the music you are
+listening to), go through the `pulse` device and name the source:
+
+```
+pactl list short sources                                   # list sources
+pactl get-default-source                                   # what `default` captures
+AUDIO_DEVICE=pulse PULSE_SOURCE=<source name> cargo run --release -- --audio
+```
+
+To see which source actually carries sound, run `--listen` against it and watch the level
+(silence is around -80 dB or lower; a playing instrument or music is roughly -40 to -10 dB):
+
+```
+AUDIO_DEVICE=pulse PULSE_SOURCE=<source name> LISTEN_SECS=5 cargo run --release -- --listen
+```
+
+Terminal tools for checking detection without the visuals:
+
+```
+cargo run --release -- --listen basic-pitch          # print live detections + level/CPU
+cargo run --release -- --probe take.wav all          # run every engine over a WAV file
+```
+
+Tuning overrides (environment variables): `TRACK_ON`, `TRACK_OFF`, `TRACK_ON_FRAMES`,
+`TRACK_OFF_FRAMES` (note on/off thresholds and debounce), `BASIC_PITCH_LOOKAHEAD` (frames,
+default 6: lower is faster but misses more), `SWIFT_F0_LOOKAHEAD` (default 1).
 
 ## Sketches
 

@@ -28,6 +28,7 @@ Three layers. **`main.rs`** owns the Nannou window and the active sketch. **`mid
 | 15 | `cardano` MIDI expansion — mod wheel + pitch bend for hue; CC 24 circle count knob; CC 25 dot radius | `[DONE]` |
 | 16 | `cardano` performance — `LinSrgba` mesh vertices; precomputed sin/cos table; flat trail; const index fan | `[DONE]` |
 | 17 | Remove `aurora` + `grid`; add `fireworks` — pitch→X launch, velocity→burst radius, 6 CC knobs | `[DONE]` |
+| 18 | Audio input — `A` switches notes MIDI ↔ audio; engines basic-pitch / swift-f0 / dsp-poly (`E`); `--probe` / `--listen` tools | `[DONE]` |
 
 ---
 

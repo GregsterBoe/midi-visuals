@@ -1,15 +1,16 @@
 use crate::midi::{MidiState, NoteState};
-use crate::sketches::{Param, Sketch};
+use crate::sketches::{Param, Sketch, Smoothed};
 use bytemuck::{Pod, Zeroable};
 use nannou::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 
 const PARAMS: &[Param] = &[
-    Param::new(1,  "hue",   0.0,  1.0),
-    Param::new(24, "speed", 0.1,  3.0),
-    Param::new(25, "freq",  5.0, 35.0),
-    Param::new(26, "warp",  0.0,  1.4),
+    Param::new(1,  "hue",    0.0,  1.0),
+    Param::new(24, "speed",  0.1,  3.0),
+    Param::new(25, "freq",   5.0, 35.0),
+    Param::new(26, "warp",   0.0,  1.4),
+    Param::new(27, "smooth", 0.0,  1.0),  // 0=punchy, 1=dreamy
 ];
 
 const ENERGY_WINDOW: f32 = 4.0;
@@ -356,16 +357,20 @@ impl GpuKal {
 pub struct Kaleidoscope {
     chord:           ChordKind,
     energy:          f32,
-    tension:         f32,
-    onset:           f32,
+    onset_raw:       f32,  // raw additive impulse accumulator
     note_timestamps: Vec<f32>,
     last_pitch_mask: u16,
     time:            f32,
 
-    p_hue:   f32,
-    p_speed: f32,
-    p_freq:  f32,
-    p_warp:  f32,
+    // Smoothed values — all driven toward targets each frame via IIR filter
+    s_hue:     Smoothed,  // chord hue      (rate 2.0 → graceful color fade)
+    s_n_sym:   Smoothed,  // fold count     (rate 2.5 → visible geometry morph)
+    s_tension: Smoothed,  // tension        (rate 2.0 → smooth chord transitions)
+    s_freq:    Smoothed,  // CC freq knob   (rate 6.0 → snappy, no 7-bit staircase)
+    s_speed:   Smoothed,  // CC speed knob
+    s_warp:    Smoothed,  // CC warp knob
+    s_onset:   Smoothed,  // smoothed onset — rate set dynamically by smooth knob
+    s_smooth:  Smoothed,  // CC smooth knob: 0=punchy, 1=dreamy
 
     color_mode:   u32,  // 0=B&W  1=color  2=inverted
     moire_on:     bool,
@@ -380,16 +385,19 @@ impl Kaleidoscope {
         Self {
             chord:           ChordKind::Other,
             energy:          0.0,
-            tension:         0.0,
-            onset:           0.0,
+            onset_raw:       0.0,
             note_timestamps: Vec::new(),
             last_pitch_mask: 0,
             time:            0.0,
 
-            p_hue:   0.0,
-            p_speed: 0.8,
-            p_freq:  18.0,
-            p_warp:  0.6,
+            s_hue:     Smoothed::new(0.0,  2.0),
+            s_n_sym:   Smoothed::new(5.0,  2.5),
+            s_tension: Smoothed::new(0.0,  2.0),
+            s_freq:    Smoothed::new(18.0, 6.0),
+            s_speed:   Smoothed::new(0.8,  6.0),
+            s_warp:    Smoothed::new(0.6,  6.0),
+            s_onset:   Smoothed::new(0.0,  4.0),
+            s_smooth:  Smoothed::new(0.0,  6.0),
 
             color_mode:   0,
             moire_on:     false,
@@ -412,22 +420,41 @@ impl Sketch for Kaleidoscope {
     fn params(&self) -> &[Param] { PARAMS }
 
     fn update(&mut self, midi: &MidiState, dt: f32) {
-        self.p_hue   = PARAMS[0].read(midi);
-        self.p_speed = PARAMS[1].read(midi);
-        self.p_freq  = PARAMS[2].read(midi);
-        self.p_warp  = PARAMS[3].read(midi);
-        self.time   += dt;
+        self.time += dt;
 
+        // Read smooth knob first so its value informs this frame's rates.
+        self.s_smooth.drive(PARAMS[4].read(midi), dt);
+        let smooth = self.s_smooth.value; // 0=punchy, 1=dreamy
+
+        // CC knobs — IIR filter removes 7-bit MIDI staircase artifacts
+        self.s_speed.drive(PARAMS[1].read(midi), dt);
+        self.s_freq.drive(PARAMS[2].read(midi),  dt);
+        self.s_warp.drive(PARAMS[3].read(midi),  dt);
+
+        // Onset: additive impulse on each note, then exponential decay.
+        // The raw value is then routed through s_onset so the RISE is also
+        // smooth — no more instant visual spike on each keypress.
         for _ in midi.note_on_events() {
             self.note_timestamps.push(self.time);
-            self.onset = (self.onset + 0.8).min(1.0);
+            self.onset_raw = (self.onset_raw + 0.8).min(1.0);
         }
+        // smooth knob controls decay rate: 5.0 (quick, punchy) → 1.5 (slow swell)
+        let onset_decay = 5.0 - smooth * 3.5;
+        self.onset_raw *= (-dt * onset_decay).exp();
+
+        // s_onset chases onset_raw — this smooths the rise, not just the fall.
+        // Rate also scaled by smooth knob: 4.0 (quick) → 1.5 (dreamy)
+        self.s_onset.rate = 4.0 - smooth * 2.5;
+        self.s_onset.drive(self.onset_raw, dt);
+
+        // Energy: note density over ENERGY_WINDOW seconds, tracked more lazily
+        // than before (rate 2.0 vs 3.0 — softer peaks when playing fast).
         self.note_timestamps.retain(|&t| self.time - t < ENERGY_WINDOW);
         let target_e = (self.note_timestamps.len() as f32 / ENERGY_PEAK).min(1.0);
-        self.energy += (target_e - self.energy) * (dt * 3.0).min(1.0);
-        self.onset  *= (-dt * 5.0_f32).exp();
+        self.energy += (target_e - self.energy) * (1.0 - (-2.0_f32 * dt).exp());
 
-        self.tension = tension(&midi.notes);
+        // Tension at rate 2.0 — smooth enough not to flicker between notes
+        self.s_tension.drive(tension(&midi.notes), dt);
 
         let cur_mask = Self::pitch_mask(&midi.notes);
         if cur_mask != self.last_pitch_mask {
@@ -435,6 +462,12 @@ impl Sketch for Kaleidoscope {
             let new_chord = detect_chord(&midi.notes);
             if new_chord != ChordKind::Other { self.chord = new_chord; }
         }
+
+        // n_sym and hue smoothly chase the chord target each frame.
+        // Because n_sym is a float in kfold(), values like 6.3 or 7.7 produce
+        // real intermediate geometries — the morph is a visible transition.
+        self.s_n_sym.drive(self.chord.n_sym(), dt);
+        self.s_hue.drive(self.chord.hue(PARAMS[0].read(midi)), dt);
     }
 
     fn view(&self, draw: &Draw, win: Rect) {
@@ -449,10 +482,11 @@ impl Sketch for Kaleidoscope {
         let mode_str = ["B&W", "color", "inv"][self.color_mode as usize];
         let pat_str  = ["rings", "stripes", "diag", "checker"][self.pattern_mode as usize];
         Some(format!(
-            "{} | e:{:.0}% t:{:.0}% | {} {} {}",
+            "{} | e:{:.0}% t:{:.0}% smooth:{:.0}% | {} {} {}",
             self.chord.label(),
             self.energy * 100.0,
-            self.tension * 100.0,
+            self.s_tension.value * 100.0,
+            self.s_smooth.value * 100.0,
             mode_str,
             pat_str,
             if self.moire_on { "moiré" } else { "" },
@@ -492,12 +526,12 @@ impl Sketch for Kaleidoscope {
                 resolution:   [win.w(), win.h()],
                 time:         self.time,
                 level:        self.energy,
-                freq:         self.p_freq + self.tension * 6.0,
-                warp_str:     self.p_warp,
-                n_sym:        self.chord.n_sym(),
-                speed:        self.p_speed,
-                onset:        self.onset,
-                hue:          self.chord.hue(self.p_hue),
+                freq:         self.s_freq.value + self.s_tension.value * 6.0,
+                warp_str:     self.s_warp.value,
+                n_sym:        self.s_n_sym.value,
+                speed:        self.s_speed.value,
+                onset:        self.s_onset.value,
+                hue:          self.s_hue.value,
                 sat:          0.85,
                 color_mode:   self.color_mode as f32,
                 moire_mix:    if self.moire_on { 0.7 } else { 0.0 },
