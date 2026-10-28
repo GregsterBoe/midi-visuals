@@ -186,6 +186,9 @@ count tied to chord note count (triad = 3 dots deflected, 7th chord = 4).
 | Note number | `ev.note / 127.0` | Y-position of spawned droplet cluster: high notes → top of screen, low notes → bottom |
 | Note velocity | `ev.velocity` | Droplet radius and alpha (harder hit = bigger, brighter droplets) |
 
+Notes only drive the auto stream. The layer stream (opposite hue) is played by
+hand and doesn't read notes.
+
 **Current theory depth:** pitch as spatial position (vertical axis); velocity as
 intensity. The pitch mapping creates a keyboard-like visual: playing a scale
 produces a sweep of droplet clusters from bottom to top.

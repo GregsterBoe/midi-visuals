@@ -142,17 +142,31 @@ HUD shows `NxM circles  F frames` (collections × circles per collection, trail 
 ---
 
 ### droplets
-Simulated rain droplets follow each other's trails, leaving a glowing field. Note-on spawns droplets anchored to the played note's Y position.
+Simulated rain droplets follow each other's trails, leaving a glowing field. Droplets come in two streams:
 
-| CC | Parameter   | Range       |
-|----|-------------|-------------|
-| 24 | Base hue    | 0 – 360°    |
-| 25 | Spawn rate  | 0 – 300 /s  |
-| 26 | Attraction  | 0 – 3       |
-| 27 | Jitter      | 0 – 120     |
-| 28 | Decay       | 0.05 – 2.0  |
+- **Auto**: every note played (MIDI or audio) sends a cluster of droplets in at the note's height. High notes enter at the top, low notes at the bottom.
+- **Layer**: a stream you control yourself, drawn in the opposite hue. You turn the flow on and off, set where and how wide it enters, and fire one-off surges.
 
-HUD shows live droplet count.
+The knobs tune both streams by default. With `T` they tune only the auto stream or only the layer. The other stream keeps its values, so the two can drift apart.
+
+| CC | Parameter   | Range       | Applies to |
+|----|-------------|-------------|------------|
+| 24 | Base hue    | 0 – 360°    | per stream (layer = hue + 180°) |
+| 25 | Flow rate   | 0 – 300 /s  | layer |
+| 26 | Attraction  | 0 – 3       | per stream |
+| 27 | Jitter      | 0 – 120     | per stream |
+| 28 | Decay       | 0.05 – 2.0  | shared trail field |
+| 29 | Flow y      | bottom – top | layer |
+| 30 | Flow width  | 5 – 100 % of height | layer |
+
+| Key | Action |
+|-----|--------|
+| `G` | Layer flow on / off |
+| `B` | Surge: a burst of layer droplets across the flow band |
+| `T` | Knobs tune: both → auto → layer |
+| `R` | Clear |
+
+HUD shows the droplet count, trail coverage, and `[flow+tune auto]`-style flags.
 
 ---
 

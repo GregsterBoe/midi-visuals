@@ -60,6 +60,77 @@ impl Smoothed {
     pub fn snap(&mut self, value: f32) { self.value = value; }
 }
 
+/// The two streams of a layered sketch: `Auto` is drawn from the notes
+/// played (MIDI or audio), `Layer` is played by hand on top of it through
+/// keys, panel buttons and knobs, in the opposite colour.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Stream {
+    Auto,
+    Layer,
+}
+
+/// Which stream the knobs tune.
+#[derive(Clone, Copy, PartialEq)]
+pub enum TuneTarget {
+    Both,
+    Auto,
+    Layer,
+}
+
+impl TuneTarget {
+    pub fn next(self) -> Self {
+        match self {
+            TuneTarget::Both => TuneTarget::Auto,
+            TuneTarget::Auto => TuneTarget::Layer,
+            TuneTarget::Layer => TuneTarget::Both,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TuneTarget::Both => "both",
+            TuneTarget::Auto => "auto",
+            TuneTarget::Layer => "layer",
+        }
+    }
+}
+
+/// A value per stream for each of a sketch's params. A knob that moves sets
+/// the streams `target` picks; the other stream keeps the value it had.
+pub struct StreamParams {
+    pub target: TuneTarget,
+    auto: Vec<f32>,
+    layer: Vec<f32>,
+    /// Knob positions last frame; NaN until the first frame, so both
+    /// streams start from the knobs.
+    seen: Vec<f32>,
+}
+
+impl StreamParams {
+    pub fn new(n: usize) -> Self {
+        Self { target: TuneTarget::Both, auto: vec![0.0; n], layer: vec![0.0; n], seen: vec![f32::NAN; n] }
+    }
+
+    pub fn update(&mut self, params: &[Param], midi: &MidiState) {
+        for (i, p) in params.iter().enumerate() {
+            let raw = midi.ccs[p.cc as usize];
+            if raw == self.seen[i] { continue; }
+            let first = self.seen[i].is_nan();
+            let v = p.read(midi);
+            if first || self.target != TuneTarget::Layer { self.auto[i] = v; }
+            if first || self.target != TuneTarget::Auto { self.layer[i] = v; }
+            self.seen[i] = raw;
+        }
+    }
+
+    pub fn get(&self, stream: Stream, i: usize) -> f32 {
+        match stream {
+            Stream::Auto => self.auto[i],
+            Stream::Layer => self.layer[i],
+        }
+    }
+}
+
 pub trait Sketch {
     fn update(&mut self, midi: &MidiState, dt: f32);
     fn view(&self, draw: &Draw, win: Rect);

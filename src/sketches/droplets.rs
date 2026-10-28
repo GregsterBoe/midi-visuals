@@ -1,5 +1,5 @@
 use crate::midi::MidiState;
-use crate::sketches::{Param, Sketch};
+use crate::sketches::{Param, Sketch, Stream, StreamParams, TuneTarget};
 use nannou::prelude::*;
 use nannou::rand::{thread_rng, Rng};
 use std::cell::{Cell, RefCell};
@@ -15,9 +15,6 @@ const DECAY_SPEED_GAIN: f32 = 150.0; // added speed per unit of decay_rate
 const SPEED_VARIATION: f32 = 0.25;  // ± fraction of base speed
 const DROPLET_RADIUS: f32 = 2.0;
 const DROPLET_ALPHA: f32 = 0.78;
-
-const ENTRY_CENTER_Y: f32 = 0.5;    // 0 = top, 1 = bottom of window
-const ENTRY_SPREAD: f32 = 0.8;      // fraction of window height
 
 const PATH_PROBE_AHEAD: f32 = 18.0; // px ahead to probe
 const PATH_PROBE_STEP: f32 = 10.0;  // px up/down for steering probe
@@ -85,16 +82,31 @@ struct DropletWgpu {
 }
 
 // ── MIDI params ───────────────────────────────────────────────────────────────
+// hue, attraction and jitter are kept per stream and follow the tune target.
+// decay is shared (both streams draw into one trail field); the flow params
+// only drive the layer.
 const PARAMS: &[Param] = &[
     Param::new(24, "base hue",   0.0,  360.0),
-    Param::new(25, "spawn rate", 0.0,  300.0),
+    Param::new(25, "flow rate",  0.0,  300.0),
     Param::new(26, "attraction", 0.0,  3.0),
     Param::new(27, "jitter",     0.0,  120.0),
     Param::new(28, "decay",      0.05, 2.0),
+    Param::new(29, "flow y",     0.0,  1.0),
+    Param::new(30, "flow width", 0.05, 1.0),
 ];
+const P_HUE: usize = 0;
+const P_FLOW_RATE: usize = 1;
+const P_ATTRACTION: usize = 2;
+const P_JITTER: usize = 3;
+const P_DECAY: usize = 4;
+const P_FLOW_Y: usize = 5;
+const P_FLOW_WIDTH: usize = 6;
+
+// ── layer ─────────────────────────────────────────────────────────────────────
+const SURGE_COUNT: usize = 60;      // droplets in one surge, spread over the flow band
 
 // ── color ─────────────────────────────────────────────────────────────────────
-const BASE_HUE: f32 = 210.0;
+const LAYER_HUE_OFFSET: f32 = 180.0; // the layer is drawn in the opposite hue
 const BASE_SAT: f32 = 0.75;
 const BASE_LIGHT: f32 = 0.55;
 const MIN_LUMA_SPAWN: f32 = 0.32;
@@ -110,6 +122,7 @@ struct Droplet {
     radius: f32,
     alpha: f32,
     color: [f32; 3],
+    stream: Stream,
     alive: bool,
 }
 
@@ -117,12 +130,17 @@ pub struct Droplets {
     droplets: Vec<Droplet>,
     influence: Vec<f32>,
     trail_rgb: Vec<[f32; 3]>,
+    /// How much of each cell's trail the layer laid down: 0 = auto, 1 = layer.
+    trail_layer: Vec<f32>,
     cols: usize,
     rows: usize,
+    tunes: StreamParams,
+    /// The layer's continuous flow, toggled by hand.
+    flow: bool,
+    surge: bool,
     spawn_accum: f32,
-    base_hue: f32,
     win: Cell<Rect>,
-    deposits: Vec<(Vec2, f32, [f32; 3])>,
+    deposits: Vec<(Vec2, f32, [f32; 3], Stream)>,
     trail_instances: Vec<f32>,   // 10 floats per quad instance, rebuilt every TRAIL_REBUILD_INTERVAL frames
     drop_instances: Vec<f32>,    // 10 floats per quad instance, rebuilt every frame
     trail_frame: u8,
@@ -141,10 +159,13 @@ impl Droplets {
             droplets: Vec::new(),
             influence: vec![0.0; max_cells],
             trail_rgb: vec![[0.0; 3]; max_cells],
+            trail_layer: vec![0.0; max_cells],
             cols,
             rows,
+            tunes: StreamParams::new(PARAMS.len()),
+            flow: false,
+            surge: false,
             spawn_accum: 0.0,
-            base_hue: BASE_HUE,
             win: Cell::new(Rect::from_w_h(win_w, win_h)),
             deposits: Vec::new(),
             trail_instances: Vec::with_capacity(max_cells * INSTANCE_FLOATS),
@@ -297,13 +318,8 @@ impl Droplets {
         }
     }
 
-    fn trail_rgb_at(&self, pos: Vec2) -> [f32; 3] {
-        let (gx, gy) = self.cell_of(pos);
-        self.cell_idx(gx, gy)
-            .map_or([0.1, 0.45, 0.9], |i| enforce_min_luma(self.trail_rgb[i], MIN_LUMA_TRAIL))
-    }
-
-    fn deposit(&mut self, pos: Vec2, amount: f32, color: [f32; 3]) {
+    fn deposit(&mut self, pos: Vec2, amount: f32, color: [f32; 3], stream: Stream) {
+        let layer = if stream == Stream::Layer { 1.0 } else { 0.0 };
         let win = self.win.get();
         let cx = ((pos.x - win.left()) / CELL_SIZE) as i32;
         let cy = ((win.top() - pos.y) / CELL_SIZE) as i32;
@@ -321,23 +337,32 @@ impl Droplets {
                     for c in 0..3 {
                         self.trail_rgb[i][c] += (color[c] - self.trail_rgb[i][c]) * blend;
                     }
+                    self.trail_layer[i] += (layer - self.trail_layer[i]) * blend;
                 }
             }
         }
     }
 
-    fn pick_color(&self, rng: &mut impl Rng, probe: Vec2) -> [f32; 3] {
-        let base = random_blue(rng, self.base_hue);
-        let (gx, gy) = self.cell_of(probe);
-        let influence = self.cell_idx(gx, gy).map_or(0.0, |i| self.influence[i]);
-        if influence < INFLUENCE_THRESHOLD { return base; }
+    fn stream_hue(&self, stream: Stream) -> f32 {
+        let hue = self.tunes.get(stream, P_HUE);
+        if stream == Stream::Layer { hue + LAYER_HUE_OFFSET } else { hue }
+    }
 
-        let trail = self.trail_rgb_at(probe);
+    fn pick_color(&self, rng: &mut impl Rng, probe: Vec2, stream: Stream) -> [f32; 3] {
+        let base = random_tint(rng, self.stream_hue(stream));
+        let (gx, gy) = self.cell_of(probe);
+        let Some(i) = self.cell_idx(gx, gy) else { return base };
+        if self.influence[i] < INFLUENCE_THRESHOLD { return base; }
+
+        let trail = enforce_min_luma(self.trail_rgb[i], MIN_LUMA_TRAIL);
         let tl = luma(trail);
         if tl < 0.08 { return base; }
 
+        // Only trail laid by the droplet's own stream tints it, so the two
+        // streams keep their opposite colours where they cross.
+        let own = if stream == Stream::Layer { self.trail_layer[i] } else { 1.0 - self.trail_layer[i] };
         let t = ((tl - 0.08) / 0.32).clamp(0.0, 1.0);
-        let mix = 0.80 - 0.52 * t;
+        let mix = 1.0 - (0.20 + 0.52 * t) * own;
         let mixed = [
             trail[0] * (1.0 - mix) + base[0] * mix,
             trail[1] * (1.0 - mix) + base[1] * mix,
@@ -346,22 +371,31 @@ impl Droplets {
         enforce_min_luma(mixed, MIN_LUMA_MIXED)
     }
 
-    fn spawn_one(&mut self, rng: &mut impl Rng, win: Rect, jitter_range: f32) {
+    fn spawn(&mut self, rng: &mut impl Rng, y: f32, stream: Stream, radius: f32, alpha: f32) {
+        if self.droplets.len() >= MAX_DROPLETS { return; }
+        let win = self.win.get();
         let x = win.right() + SPAWN_MARGIN;
-        let center_y = win.top() - ENTRY_CENTER_Y * win.h();
-        let half = ENTRY_SPREAD * win.h() * 0.5;
-        let y = (center_y + rng.gen_range(-half..half)).clamp(win.bottom(), win.top());
-        let color = self.pick_color(rng, vec2(x - PATH_PROBE_AHEAD, y));
+        let y = y.clamp(win.bottom() + CLAMP_PAD, win.top() - CLAMP_PAD);
+        let color = self.pick_color(rng, vec2(x - PATH_PROBE_AHEAD, y), stream);
         self.droplets.push(Droplet {
             pos: vec2(x, y),
             prev_pos: vec2(x, y),
-            vel_y: rng.gen_range(-1.0f32..1.0) * jitter_range * 0.2,
-            radius: (DROPLET_RADIUS + rng.gen_range(-0.7f32..0.9f32)).max(0.4),
-            alpha: (DROPLET_ALPHA + rng.gen_range(-40.0f32 / 255.0..25.0f32 / 255.0))
-                .clamp(40.0 / 255.0, 1.0),
+            vel_y: rng.gen_range(-1.0f32..1.0) * self.tunes.get(stream, P_JITTER) * 0.2,
+            radius: radius.max(0.4),
+            alpha: alpha.clamp(40.0 / 255.0, 1.0),
             color,
+            stream,
             alive: true,
         });
+    }
+
+    /// One droplet of the layer's flow, entering somewhere in the flow band.
+    fn spawn_flow(&mut self, rng: &mut impl Rng, band: (f32, f32)) {
+        let (center, half) = band;
+        let y = center + rng.gen_range(-half..=half);
+        let radius = DROPLET_RADIUS + rng.gen_range(-0.7f32..0.9f32);
+        let alpha = DROPLET_ALPHA + rng.gen_range(-40.0f32 / 255.0..25.0f32 / 255.0);
+        self.spawn(rng, y, Stream::Layer, radius, alpha);
     }
 
     // Rebuilds trail instance data. Called every TRAIL_REBUILD_INTERVAL frames.
@@ -422,11 +456,13 @@ impl Sketch for Droplets {
         let mut rng = thread_rng();
         let win = self.win.get();
 
-        self.base_hue    = PARAMS[0].read(midi);
-        let spawn_rate   = PARAMS[1].read(midi);
-        let attraction   = PARAMS[2].read(midi);
-        let jitter_range = PARAMS[3].read(midi);
-        let decay_rate   = PARAMS[4].read(midi);
+        self.tunes.update(PARAMS, midi);
+        let flow_rate  = PARAMS[P_FLOW_RATE].read(midi);
+        let decay_rate = PARAMS[P_DECAY].read(midi);
+        let band = flow_band(win, PARAMS[P_FLOW_Y].read(midi), PARAMS[P_FLOW_WIDTH].read(midi));
+        // (attraction, jitter) per stream, indexed by `stream_slot`.
+        let steer = [Stream::Auto, Stream::Layer]
+            .map(|s| (self.tunes.get(s, P_ATTRACTION), self.tunes.get(s, P_JITTER)));
 
         let new_cols = (win.w() / CELL_SIZE).ceil() as usize;
         let new_rows = (win.h() / CELL_SIZE).ceil() as usize;
@@ -435,6 +471,7 @@ impl Sketch for Droplets {
             self.rows = new_rows;
             self.influence = vec![0.0; new_cols * new_rows];
             self.trail_rgb = vec![[0.0; 3]; new_cols * new_rows];
+            self.trail_layer = vec![0.0; new_cols * new_rows];
             self.droplets.clear();
             self.spawn_accum = 0.0;
             self.trail_frame = 0;
@@ -453,6 +490,7 @@ impl Sketch for Droplets {
 
             for d in &mut self.droplets {
                 d.prev_pos = d.pos;
+                let (attraction, jitter_range) = steer[stream_slot(d.stream)];
 
                 let probe_x = d.pos.x - PATH_PROBE_AHEAD;
                 let c  = cell_sample(influence, cols, rows, win, vec2(probe_x, d.pos.y));
@@ -479,7 +517,7 @@ impl Sketch for Droplets {
                 d.pos.y = (d.pos.y + d.vel_y * dt)
                     .clamp(win.bottom() + CLAMP_PAD, win.top() - CLAMP_PAD);
 
-                deposits.push((d.pos, INFLUENCE_DEPOSIT * dt * 60.0, d.color));
+                deposits.push((d.pos, INFLUENCE_DEPOSIT * dt * 60.0, d.color, d.stream));
 
                 if d.pos.x < win.left() - SPAWN_MARGIN {
                     d.alive = false;
@@ -487,42 +525,39 @@ impl Sketch for Droplets {
             }
         }
 
-        for (pos, amount, color) in deposits.drain(..) {
-            self.deposit(pos, amount, color);
+        for (pos, amount, color, stream) in deposits.drain(..) {
+            self.deposit(pos, amount, color, stream);
         }
         self.deposits = deposits;
 
         self.droplets.retain(|d| d.alive);
 
-        // Note-on burst: high notes → top, low notes → bottom.
+        // Auto stream — note-on burst: high notes → top, low notes → bottom.
         // Velocity scales radius and alpha; all droplets cross the full screen.
         for event in midi.note_on_events() {
-            let remaining = MAX_DROPLETS.saturating_sub(self.droplets.len());
-            if remaining == 0 { break; }
+            if self.droplets.len() >= MAX_DROPLETS { break; }
             let note_y = win.bottom() + (event.note as f32 / 127.0) * win.h();
-            let count = rng.gen_range(4..=8_usize).min(remaining);
             let velocity = event.velocity;
-            for _ in 0..count {
-                let y = (note_y + rng.gen_range(-20.0f32..20.0f32))
-                    .clamp(win.bottom() + CLAMP_PAD, win.top() - CLAMP_PAD);
-                let x = win.right() + SPAWN_MARGIN;
-                let color = self.pick_color(&mut rng, vec2(x - PATH_PROBE_AHEAD, y));
-                self.droplets.push(Droplet {
-                    pos: vec2(x, y),
-                    prev_pos: vec2(x, y),
-                    vel_y: rng.gen_range(-1.0f32..1.0) * jitter_range * 0.2,
-                    radius: (DROPLET_RADIUS * (0.7 + 0.6 * velocity)).max(0.4),
-                    alpha: (DROPLET_ALPHA * (0.5 + 0.5 * velocity)).clamp(40.0 / 255.0, 1.0),
-                    color,
-                    alive: true,
-                });
+            for _ in 0..rng.gen_range(4..=8_usize) {
+                let y = note_y + rng.gen_range(-20.0f32..20.0f32);
+                let radius = DROPLET_RADIUS * (0.7 + 0.6 * velocity);
+                let alpha = DROPLET_ALPHA * (0.5 + 0.5 * velocity);
+                self.spawn(&mut rng, y, Stream::Auto, radius, alpha);
             }
         }
 
-        self.spawn_accum += spawn_rate * dt;
-        while self.spawn_accum >= 1.0 && self.droplets.len() < MAX_DROPLETS {
-            self.spawn_accum -= 1.0;
-            self.spawn_one(&mut rng, win, jitter_range);
+        // Layer: the continuous flow while it's on, plus a surge when asked for.
+        if self.flow {
+            self.spawn_accum += flow_rate * dt;
+            while self.spawn_accum >= 1.0 && self.droplets.len() < MAX_DROPLETS {
+                self.spawn_accum -= 1.0;
+                self.spawn_flow(&mut rng, band);
+            }
+        }
+        if std::mem::take(&mut self.surge) {
+            for _ in 0..SURGE_COUNT {
+                self.spawn_flow(&mut rng, band);
+            }
         }
 
         if self.trail_frame == 0 {
@@ -608,7 +643,32 @@ impl Sketch for Droplets {
     fn hud_info(&self) -> Option<String> {
         let active = self.influence.iter().filter(|&&v| v >= INFLUENCE_THRESHOLD).count();
         let sat = active as f32 / (self.cols * self.rows) as f32;
-        Some(format!("{} droplets  sat {:.0}%", self.droplets.len(), sat * 100.0))
+        let mut flags = Vec::new();
+        if self.flow { flags.push("flow".to_string()); }
+        if self.tunes.target != TuneTarget::Both {
+            flags.push(format!("tune {}", self.tunes.target.label()));
+        }
+        let suffix = if flags.is_empty() { String::new() } else { format!("  [{}]", flags.join("+")) };
+        Some(format!("{} droplets  sat {:.0}%{suffix}", self.droplets.len(), sat * 100.0))
+    }
+
+    fn actions(&self) -> &[(Key, &'static str)] {
+        &[(Key::G, "Flow"), (Key::B, "Surge"), (Key::T, "Tune: both / auto / layer"), (Key::R, "Clear")]
+    }
+
+    fn key_pressed(&mut self, key: Key) {
+        match key {
+            Key::G => { self.flow = !self.flow; self.spawn_accum = 0.0; }
+            Key::B => self.surge = true,
+            Key::T => self.tunes.target = self.tunes.target.next(),
+            Key::R => {
+                self.droplets.clear();
+                self.influence.fill(0.0);
+                self.trail_rgb.fill([0.0; 3]);
+                self.trail_layer.fill(0.0);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -624,7 +684,22 @@ fn cell_sample(influence: &[f32], cols: usize, rows: usize, win: Rect, pos: Vec2
     }
 }
 
-fn random_blue(rng: &mut impl Rng, base_hue: f32) -> [f32; 3] {
+fn stream_slot(stream: Stream) -> usize {
+    match stream {
+        Stream::Auto => 0,
+        Stream::Layer => 1,
+    }
+}
+
+/// The band the layer's flow enters through, as (center y, half height).
+/// `width` is a fraction of the window; `pos` slides the band from the
+/// bottom edge to the top without letting it leave the window.
+fn flow_band(win: Rect, pos: f32, width: f32) -> (f32, f32) {
+    let half = width * win.h() * 0.5;
+    (win.bottom() + half + pos * (win.h() - 2.0 * half), half)
+}
+
+fn random_tint(rng: &mut impl Rng, base_hue: f32) -> [f32; 3] {
     let h = (base_hue + rng.gen_range(-12.0f32..12.0f32)).rem_euclid(360.0);
     let s = (BASE_SAT   + rng.gen_range(-0.07f32..0.07f32)).clamp(0.0, 1.0);
     let l = (BASE_LIGHT + rng.gen_range(-0.07f32..0.05f32)).clamp(0.0, 1.0);
