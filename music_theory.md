@@ -227,24 +227,6 @@ shell ascent); scale conformity colouring (chromatic notes = desaturated shell).
 
 ---
 
-### `particles`
-
-| Source | Value read | Effect |
-|--------|-----------|--------|
-| Note events | presence only (`for _ in midi.note_on_events()`) | Triggers a spawn burst; note number and velocity are **not read** |
-
-**Current theory depth:** none — every note is treated identically regardless
-of pitch or velocity. The sketch reacts only to the rhythmic density of playing
-(more notes = more particles), not to any musical content.
-
-**Natural extensions:** this sketch has the most headroom. Pitch could map
-spawn position (keyboard layout across screen); velocity to spawn count and
-particle speed; consonance between held notes to particle spread (tight cluster
-vs scattered cloud); the current hue could shift based on whether the played
-note is diatonic or chromatic.
-
----
-
 ### `rings`
 
 | Source | Value read | Effect |

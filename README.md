@@ -174,21 +174,6 @@ HUD shows live shell and particle counts.
 
 ---
 
-### particles
-Note-on events spawn bursts of particles that fly outward, fade, and die.
-
-| CC | Parameter   | Range                         |
-|----|-------------|-------------------------------|
-| 24 | Base hue    | full spectrum                 |
-| 25 | Hue spread  | 0 = monochrome, 0.5 = wide mix |
-| 26 | Gravity     | 0 – 500                       |
-| 27 | Drag        | 0 – 4                         |
-| 28 | Spawn count | 1 – 50 per note               |
-
-HUD shows live particle count.
-
----
-
 ### rings
 Note-on events spawn expanding rings positioned by note pitch. Optional gravity and rain mode.
 

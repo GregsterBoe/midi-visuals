@@ -196,10 +196,13 @@ midi-visuals/
     presets.rs       ← preset save/load (presets/<sketch>.txt), audio settings (presets/audio.json), controller layout (presets/controller.json)
     sketches/
       mod.rs         ← Sketch trait, Param struct, registry
-      aurora.rs      ← MIDI-reactive aurora bands
+      cardano.rs     ← spirograph epicycloids with spring deflection on notes
       droplets.rs    ← fluid droplet simulation (instanced wgpu rendering)
-      grid.rs        ← 8×8 note grid
-      particles.rs   ← particle system
+      fireworks.rs   ← pitch-placed shells bursting into chord-shaped sprays
+      kaleidoscope.rs ← GPU shader kaleidoscope (domain-warped pattern, polar folding)
+      mandala.rs     ← layered symmetric mandala (petal rings)
+      rings.rs       ← expanding rings, rain and gravity modes
+      zodiac_points.rs ← generated animal silhouettes used by fireworks
 ```
 
 Each sketch implements the `Sketch` trait:
