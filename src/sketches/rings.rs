@@ -1,9 +1,11 @@
 use crate::midi::MidiState;
-use crate::sketches::{Param, Sketch};
+use crate::sketches::{flag_suffix, Param, Sketch, Stream, StreamParams, LAYER_HUE_SHIFT};
 use nannou::prelude::*;
 use nannou::rand::{thread_rng, Rng};
 use std::cell::Cell;
 
+// hue, max radius, speed and gravity are kept per stream and follow the tune
+// target; rain rate and spread only drive the layer.
 const PARAMS: &[Param] = &[
     Param::new(24, "hue",      0.0,    1.0),
     Param::new(25, "max_r",    5.0, 1200.0),
@@ -12,16 +14,27 @@ const PARAMS: &[Param] = &[
     Param::new(28, "rain/s",   0.1,   30.0),
     Param::new(29, "r-spread", 0.0,  200.0),
 ];
+const P_HUE: usize = 0;
+const P_MAX_R: usize = 1;
+const P_SPEED: usize = 2;
+const P_GRAVITY: usize = 3;
+const P_RAIN_RATE: usize = 4;
+const P_SPREAD: usize = 5;
 
 const RAIN_COLOR_SPLIT: f32 = 0.1;
 const RAIN_CYCLE_SECS: f32 = 10.0;
+const HALO_RINGS: usize = 12;     // rings in one halo, evenly round the rain circle
+const HALO_MIN_SPREAD: f32 = 60.0;
 
 const N_SIDES: usize = 16;
 const MAX_RINGS: usize = 2_000;
 
 pub struct Rings {
     rings: Vec<Ring>,
+    tunes: StreamParams,
+    /// The layer's rain, toggled by hand.
     rain: bool,
+    halo: bool,
     gravity_on: bool,
     push_pull: f32,
     rain_accum: f32,
@@ -40,6 +53,7 @@ struct Ring {
     grow_rate: f32,
     hue: f32,
     base_alpha: f32,
+    stream: Stream,
 }
 
 impl Ring {
@@ -52,7 +66,9 @@ impl Rings {
     pub fn new() -> Self {
         Self {
             rings: Vec::new(),
+            tunes: StreamParams::new(PARAMS.len()),
             rain: false,
+            halo: false,
             gravity_on: false,
             push_pull: 1.0,
             rain_accum: 0.0,
@@ -64,17 +80,28 @@ impl Rings {
         }
     }
 
-    fn spawn_at(&mut self, pos: Vec2, max_radius: f32, grow_rate: f32, hue: f32, base_alpha: f32) {
+    fn spawn_at(&mut self, pos: Vec2, stream: Stream, max_radius: f32, hue: f32, base_alpha: f32) {
         if self.rings.len() >= MAX_RINGS { return; }
         self.rings.push(Ring {
             center: pos,
             offset: Vec2::ZERO,
             radius: 2.0,
             max_radius,
-            grow_rate,
+            grow_rate: self.tunes.get(stream, P_SPEED),
             hue: hue.rem_euclid(1.0),
             base_alpha,
+            stream,
         });
+    }
+
+    /// One layer ring at `angle` on the rain circle, alternating either side
+    /// of the layer's hue.
+    fn spawn_layer(&mut self, angle: f32, spread: f32) {
+        let pos = self.win.get().xy() + vec2(angle.cos(), angle.sin()) * spread;
+        let split = if self.rain_flip { RAIN_COLOR_SPLIT } else { -RAIN_COLOR_SPLIT };
+        self.rain_flip = !self.rain_flip;
+        let hue = self.tunes.get(Stream::Layer, P_HUE) + LAYER_HUE_SHIFT + split;
+        self.spawn_at(pos, Stream::Layer, self.tunes.get(Stream::Layer, P_MAX_R), hue, 0.8);
     }
 
     fn build_mesh(&mut self) {
@@ -103,27 +130,23 @@ impl Rings {
 
 impl Sketch for Rings {
     fn update(&mut self, midi: &MidiState, dt: f32) {
-        let hue       = PARAMS[0].read(midi);
-        let max_r     = PARAMS[1].read(midi);
-        let speed     = PARAMS[2].read(midi);
-        let gravity   = PARAMS[3].read(midi);
-        let rain_rate = PARAMS[4].read(midi);
-        let r_spread  = PARAMS[5].read(midi);
+        self.tunes.update(PARAMS, midi);
+        let rain_rate = PARAMS[P_RAIN_RATE].read(midi);
+        let r_spread  = PARAMS[P_SPREAD].read(midi);
 
         let win = self.win.get();
         let gravity_center = win.xy();
-        let gravity_on = self.gravity_on;
-        let push_pull = self.push_pull;
 
         self.rain_angle = (self.rain_angle + dt * TAU / RAIN_CYCLE_SECS).rem_euclid(TAU);
 
         for r in &mut self.rings {
             r.radius += r.grow_rate * dt;
-            if gravity_on && gravity > 0.0 {
+            let gravity = self.tunes.get(r.stream, P_GRAVITY);
+            if self.gravity_on && gravity > 0.0 {
                 let diff = (r.center + r.offset) - gravity_center;
                 let dist = diff.length();
                 if dist > 1.0 {
-                    r.offset += push_pull * gravity * (diff / dist) * dt;
+                    r.offset += self.push_pull * gravity * (diff / dist) * dt;
                 }
             }
         }
@@ -131,25 +154,31 @@ impl Sketch for Rings {
 
         let mut rng = thread_rng();
 
+        // Auto stream: a ring per note, pitch → x.
+        let hue   = self.tunes.get(Stream::Auto, P_HUE);
+        let max_r = self.tunes.get(Stream::Auto, P_MAX_R);
         for ev in midi.note_on_events() {
             let x = win.left() + (ev.note as f32 / 127.0) * win.w();
             let y = rng.gen_range(win.bottom() * 0.8..win.top() * 0.8);
             let r_max = max_r * (0.5 + ev.velocity * 0.5);
-            let note_hue = (hue + ev.note as f32 / 127.0 * 0.3).rem_euclid(1.0);
-            self.spawn_at(vec2(x, y), r_max, speed, note_hue, ev.velocity.max(0.4));
+            let note_hue = hue + ev.note as f32 / 127.0 * 0.3;
+            self.spawn_at(vec2(x, y), Stream::Auto, r_max, note_hue, ev.velocity.max(0.4));
         }
 
+        // Layer: rain from a slowly turning point on the rain circle while
+        // it's on, plus a whole halo round that circle when asked for.
         if self.rain && rain_rate > 0.0 {
             self.rain_accum += dt;
             let interval = 1.0 / rain_rate;
             while self.rain_accum >= interval {
                 self.rain_accum -= interval;
-                let pos = win.xy()
-                    + vec2(self.rain_angle.cos(), self.rain_angle.sin()) * r_spread;
-                let offset = if self.rain_flip { RAIN_COLOR_SPLIT } else { -RAIN_COLOR_SPLIT };
-                let rain_hue = (hue + 0.5 + offset).rem_euclid(1.0);
-                self.rain_flip = !self.rain_flip;
-                self.spawn_at(pos, max_r, speed, rain_hue, 0.8);
+                self.spawn_layer(self.rain_angle, r_spread);
+            }
+        }
+        if std::mem::take(&mut self.halo) {
+            for i in 0..HALO_RINGS {
+                let angle = self.rain_angle + i as f32 * TAU / HALO_RINGS as f32;
+                self.spawn_layer(angle, r_spread.max(HALO_MIN_SPREAD));
             }
         }
 
@@ -176,24 +205,29 @@ impl Sketch for Rings {
         if self.gravity_on {
             flags.push(if self.push_pull > 0.0 { "push" } else { "pull" });
         }
-        let suffix = if flags.is_empty() {
-            String::new()
-        } else {
-            format!("  [{}]", flags.join("+"))
-        };
-        Some(format!("{} rings{}", self.rings.len(), suffix))
+        flags.extend(self.tunes.hud_flag());
+        Some(format!("{} rings{}", self.rings.len(), flag_suffix(&flags)))
     }
 
     fn actions(&self) -> &[(Key, &'static str)] {
-        &[(Key::G, "Rain"), (Key::O, "Gravity"), (Key::K, "Push / pull"), (Key::R, "Clear")]
+        &[
+            (Key::G, "Rain"),
+            (Key::B, "Halo"),
+            (Key::T, "Tune: both / auto / layer"),
+            (Key::R, "Clear"),
+            (Key::O, "Gravity"),
+            (Key::K, "Push / pull"),
+        ]
     }
 
     fn key_pressed(&mut self, key: Key) {
         match key {
             Key::G => { self.rain = !self.rain; self.rain_accum = 0.0; }
+            Key::B => self.halo = true,
+            Key::T => self.tunes.target = self.tunes.target.next(),
+            Key::R => self.rings.clear(),
             Key::O => self.gravity_on = !self.gravity_on,
             Key::K => self.push_pull = -self.push_pull,
-            Key::R => self.rings.clear(),
             _ => {}
         }
     }

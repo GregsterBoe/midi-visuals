@@ -1,11 +1,14 @@
 use crate::midi::{MidiState, NoteState};
-use crate::sketches::{Param, Sketch};
+use crate::sketches::{flag_suffix, Param, Sketch, Stream, StreamParams, LAYER_HUE_SHIFT};
 use bytemuck::{Pod, Zeroable};
 use nannou::prelude::*;
 use nannou::rand::{thread_rng, Rng};
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 
+// hue, circles, dot radius, speed, ratio and orbit radius are kept per stream
+// and follow the tune target; alignment (between the auto collections) and
+// trail length (one shared trail texture) are not.
 const PARAMS: &[Param] = &[
     Param::new(1,  "hue",     0.0,    1.0),
     Param::new(24, "circles", 1.0,   16.0),
@@ -16,6 +19,14 @@ const PARAMS: &[Param] = &[
     Param::new(29, "align",   0.0,    1.0),
     Param::new(30, "trail",   1.0, 1000.0),
 ];
+const P_HUE: usize = 0;
+const P_CIRCLES: usize = 1;
+const P_DOT_R: usize = 2;
+const P_SPEED: usize = 3;
+const P_RATIO: usize = 4;
+const P_ORBIT_R: usize = 5;
+const P_ALIGN: usize = 6;
+const P_TRAIL: usize = 7;
 
 const N_SIDES: usize = 8;
 const MAX_BOUNDS: usize = 16;
@@ -23,6 +34,9 @@ const MAX_COLLECTIONS: usize = 4;
 const SPRING_K: f32 = 6.0;
 const SPRING_DAMP: f32 = 3.5;
 const IMPULSE_SCALE: f32 = 250.0;
+const KICK_STRENGTH: f32 = 0.9;   // a layer kick hits like a note at this velocity
+const KICK_GLOW_SECS: f32 = 1.5;  // how long a kick shows the layer while it's off
+const LAYER_ALPHA: f32 = 0.9;
 
 const INDEX_OFFSETS: [usize; N_SIDES * 3] = [
     0, 1, 2,   0, 2, 3,   0, 3, 4,   0, 4, 5,
@@ -192,8 +206,9 @@ struct FadeUniforms {
     _pad: [f32; 3],
 }
 
-const MAX_DOT_VERTS: usize = MAX_COLLECTIONS * MAX_BOUNDS * (N_SIDES + 1);
-const MAX_DOT_IDX:   usize = MAX_COLLECTIONS * MAX_BOUNDS * N_SIDES * 3;
+// The auto collections plus the layer's one.
+const MAX_DOT_VERTS: usize = (MAX_COLLECTIONS + 1) * MAX_BOUNDS * (N_SIDES + 1);
+const MAX_DOT_IDX:   usize = (MAX_COLLECTIONS + 1) * MAX_BOUNDS * N_SIDES * 3;
 
 struct GpuAccum {
     accum_texture:     wgpu::Texture,         // nannou's Texture — used by draw.texture()
@@ -426,6 +441,32 @@ impl Collection {
             angles_inner,
         }
     }
+
+    /// Advances the inner angles by `step` and lets the springs settle.
+    fn advance(&mut self, step: f32, dt: f32) {
+        for a in &mut self.angles_inner {
+            *a += step;
+        }
+        for d in &mut self.deflections {
+            d.velocity += (-SPRING_K * d.offset - SPRING_DAMP * d.velocity) * dt;
+            d.offset   += d.velocity * dt;
+        }
+    }
+
+    /// Pushes every circle outward from its orbit, bent towards `bias`.
+    fn kick(&mut self, angle_outer: f32, bias: Vec2, strength: f32) {
+        for i in 0..self.deflections.len() {
+            let orbit_angle = angle_outer + self.angles_inner[i];
+            let radial      = vec2(orbit_angle.cos(), orbit_angle.sin());
+            let dir_raw     = radial + bias;
+            let impulse_dir = if dir_raw.length_squared() > 0.001 {
+                dir_raw.normalize()
+            } else {
+                radial
+            };
+            self.deflections[i].velocity += impulse_dir * strength;
+        }
+    }
 }
 
 // --- Cardano sketch -------------------------------------------------------
@@ -436,10 +477,17 @@ pub struct Cardano {
     num_collections: usize,
     bounds: usize,
     base_alpha: f32,
+    tunes: StreamParams,
+    /// The layer: one more collection, orbiting the other way in the
+    /// opposite hue. It ignores the notes; it's switched on and kicked by hand.
+    layer_on: bool,
+    layer: Collection,
+    layer_angle_outer: f32,
+    kick: bool,
+    kick_glow: f32,
     win: Cell<Rect>,
-    // Per-frame dot state passed from update() to raw_render()
-    current_dots: Vec<(Vec2, LinSrgba)>,
-    dot_r: f32,
+    // Per-frame dot state passed from update() to raw_render(): position, colour, radius
+    current_dots: Vec<(Vec2, LinSrgba, f32)>,
     fade_alpha: f32,
     // GPU accumulation buffer — initialised lazily on first raw_render call
     gpu: RefCell<Option<GpuAccum>>,
@@ -471,13 +519,18 @@ impl Cardano {
         let angles = Self::evenly_spaced(bounds);
         Self {
             angle_outer: 0.0,
-            collections: vec![Collection::new(bounds, angles, &mut rng)],
+            collections: vec![Collection::new(bounds, angles.clone(), &mut rng)],
             num_collections: 1,
             bounds,
             base_alpha: 0.9,
+            tunes: StreamParams::new(PARAMS.len()),
+            layer_on: false,
+            layer: Collection::new(bounds, angles, &mut rng),
+            layer_angle_outer: PI,
+            kick: false,
+            kick_glow: 0.0,
             win: Cell::new(Rect::from_w_h(800.0, 600.0)),
             current_dots: Vec::new(),
-            dot_r: 10.0,
             fade_alpha: 0.02,
             gpu: RefCell::new(None),
             current_chord: ChordQuality::Other,
@@ -525,15 +578,16 @@ impl Cardano {
 
 impl Sketch for Cardano {
     fn update(&mut self, midi: &MidiState, dt: f32) {
-        let hue1      = PARAMS[0].read(midi);
-        let hue2      = midi.pitch_bend;
-        let new_bounds = PARAMS[1].read(midi).round() as usize;
-        self.dot_r    = PARAMS[2].read(midi);
-        let speed     = PARAMS[3].read(midi);
-        let ratio     = PARAMS[4].read(midi);
-        let orbit_r   = PARAMS[5].read(midi);
-        let align_t   = PARAMS[6].read(midi);
-        let trail_len = PARAMS[7].read(midi);
+        self.tunes.update(PARAMS, midi);
+        let hue1       = self.tunes.get(Stream::Auto, P_HUE);
+        let hue2       = midi.pitch_bend;
+        let new_bounds = self.tunes.get(Stream::Auto, P_CIRCLES).round() as usize;
+        let dot_r      = self.tunes.get(Stream::Auto, P_DOT_R);
+        let speed      = self.tunes.get(Stream::Auto, P_SPEED);
+        let ratio      = self.tunes.get(Stream::Auto, P_RATIO);
+        let orbit_r    = self.tunes.get(Stream::Auto, P_ORBIT_R);
+        let align_t    = PARAMS[P_ALIGN].read(midi);
+        let trail_len  = PARAMS[P_TRAIL].read(midi);
 
         // Fade alpha: chosen so the trail is near-invisible after trail_len frames.
         // 1 - 0.01^(1/trail_len) gives exact "1% brightness after trail_len frames".
@@ -559,16 +613,24 @@ impl Sketch for Cardano {
         self.angle_outer += speed * dt;
 
         for coll in &mut self.collections {
-            for a in &mut coll.angles_inner {
-                *a -= speed * ratio * dt;
-            }
-            for d in &mut coll.deflections {
-                d.velocity += (-SPRING_K * d.offset - SPRING_DAMP * d.velocity) * dt;
-                d.offset   += d.velocity * dt;
-            }
+            coll.advance(-speed * ratio * dt, dt);
         }
 
         let mut rng = thread_rng();
+
+        // Layer: turns the other way round, so it reads as its own figure.
+        let l_speed  = self.tunes.get(Stream::Layer, P_SPEED);
+        let l_bounds = (self.tunes.get(Stream::Layer, P_CIRCLES).round() as usize).clamp(1, MAX_BOUNDS);
+        if l_bounds != self.layer.angles_inner.len() {
+            self.layer = Collection::new(l_bounds, Self::evenly_spaced(l_bounds), &mut rng);
+        }
+        self.layer_angle_outer -= l_speed * dt;
+        self.layer.advance(l_speed * self.tunes.get(Stream::Layer, P_RATIO) * dt, dt);
+        if std::mem::take(&mut self.kick) {
+            self.layer.kick(self.layer_angle_outer, Vec2::ZERO, KICK_STRENGTH * IMPULSE_SCALE);
+            self.kick_glow = 1.0;
+        }
+        self.kick_glow = (self.kick_glow - dt / KICK_GLOW_SECS).max(0.0);
 
         // Compute current dot positions and colours (no trail storage)
         self.current_dots.clear();
@@ -586,26 +648,32 @@ impl Sketch for Cardano {
                 let pos = vec2(ox + r * a.cos(), oy + r * a.sin()) + d.offset;
                 let lf  = coll.lerp_factors[j];
                 let hue = (effective_hue1 + lf * (hue2 - effective_hue1) + coll_shift).rem_euclid(1.0);
-                self.current_dots.push((pos, hsl_to_lin(hue, 0.85, 0.55, self.base_alpha)));
+                self.current_dots.push((pos, hsl_to_lin(hue, 0.85, 0.55, self.base_alpha), dot_r));
             }
         }
 
+        // A kick shows the layer for a moment even while it's off.
+        let layer_alpha = LAYER_ALPHA * if self.layer_on { 1.0 } else { self.kick_glow };
+        if layer_alpha > 0.01 {
+            let l_hue1  = self.tunes.get(Stream::Layer, P_HUE);
+            let l_orbit = self.tunes.get(Stream::Layer, P_ORBIT_R);
+            let l_dot_r = self.tunes.get(Stream::Layer, P_DOT_R);
+            let ox = l_orbit * self.layer_angle_outer.cos();
+            let oy = l_orbit * self.layer_angle_outer.sin();
+            let layer = &self.layer;
+            for (j, (&a, d)) in layer.angles_inner.iter().zip(&layer.deflections).enumerate() {
+                let pos = vec2(ox + l_orbit * a.cos(), oy + l_orbit * a.sin()) + d.offset;
+                let lf  = layer.lerp_factors[j];
+                let hue = (l_hue1 + lf * (hue2 - l_hue1) + LAYER_HUE_SHIFT).rem_euclid(1.0);
+                self.current_dots.push((pos, hsl_to_lin(hue, 0.85, 0.55, layer_alpha), l_dot_r));
+            }
+        }
+
+        // Auto stream: every note kicks the collections, bent up or down by pitch.
         for ev in midi.note_on_events() {
-            let strength = ev.velocity * IMPULSE_SCALE;
-            let angle_outer = self.angle_outer;
-            let pitch_bias  = vec2(0.0, ev.note as f32 / 127.0 * 2.0 - 1.0);
+            let pitch_bias = vec2(0.0, ev.note as f32 / 127.0 * 2.0 - 1.0);
             for coll in &mut self.collections {
-                for i in 0..coll.deflections.len() {
-                    let orbit_angle = angle_outer + coll.angles_inner[i];
-                    let radial      = vec2(orbit_angle.cos(), orbit_angle.sin());
-                    let dir_raw     = radial + pitch_bias;
-                    let impulse_dir = if dir_raw.length_squared() > 0.001 {
-                        dir_raw.normalize()
-                    } else {
-                        radial
-                    };
-                    coll.deflections[i].velocity += impulse_dir * strength;
-                }
+                coll.kick(self.angle_outer, pitch_bias, ev.velocity * IMPULSE_SCALE);
             }
             self.base_alpha = ev.velocity.max(0.4);
         }
@@ -653,14 +721,13 @@ impl Sketch for Cardano {
             cos_t[k] = a.cos();
             sin_t[k] = a.sin();
         }
-        let rx = self.dot_r / half_w;  // radius in NDC x
-        let ry = self.dot_r / half_h;  // radius in NDC y (separate to keep circles round)
-
         // Build dot vertex/index data for this frame's positions only
         let mut verts: Vec<DotVertex>  = Vec::with_capacity(self.current_dots.len() * (N_SIDES + 1));
         let mut indices: Vec<u32>      = Vec::with_capacity(self.current_dots.len() * N_SIDES * 3);
 
-        for &(pos, col) in &self.current_dots {
+        for &(pos, col, dot_r) in &self.current_dots {
+            let rx  = dot_r / half_w;  // radius in NDC x
+            let ry  = dot_r / half_h;  // radius in NDC y (separate to keep circles round)
             let cx  = pos.x / half_w;
             let cy  = pos.y / half_h;
             let c   = [col.red, col.green, col.blue, col.alpha];
@@ -768,18 +835,30 @@ impl Sketch for Cardano {
         } else {
             format!("{}  tension:{:.0}%", chord_str, self.current_tension * 100.0)
         };
+        let mut flags = Vec::new();
+        if self.layer_on { flags.push("layer"); }
+        flags.extend(self.tunes.hud_flag());
         Some(format!(
-            "{}x{} circles  {}",
-            self.num_collections, self.bounds, theory
+            "{}x{} circles  {}{}",
+            self.num_collections, self.bounds, theory, flag_suffix(&flags)
         ))
     }
 
     fn actions(&self) -> &[(Key, &'static str)] {
-        &[(Key::C, "Collections"), (Key::R, "Clear trails")]
+        &[
+            (Key::G, "Layer"),
+            (Key::B, "Kick"),
+            (Key::T, "Tune: both / auto / layer"),
+            (Key::R, "Clear trails"),
+            (Key::C, "Collections"),
+        ]
     }
 
     fn key_pressed(&mut self, key: Key) {
         match key {
+            Key::G => self.layer_on = !self.layer_on,
+            Key::B => self.kick = true,
+            Key::T => self.tunes.target = self.tunes.target.next(),
             Key::C => {
                 let next = self.num_collections % MAX_COLLECTIONS + 1;
                 self.set_num_collections(next);

@@ -1,10 +1,12 @@
 use crate::midi::{MidiState, NoteState};
-use crate::sketches::{zodiac_points, Param, Sketch};
+use crate::sketches::{flag_suffix, zodiac_points, Param, Sketch, Stream, StreamParams, LAYER_HUE_SHIFT};
 use nannou::prelude::*;
 use nannou::rand::{thread_rng, Rng};
 use std::cell::Cell;
 use std::collections::HashSet;
 
+// Everything but the barrage rate is kept per stream and follows the tune
+// target; the barrage rate only drives the layer.
 const PARAMS: &[Param] = &[
     Param::new(24, "hue",        0.0,   1.0),
     Param::new(25, "shell spd",  150.0, 800.0),
@@ -12,7 +14,17 @@ const PARAMS: &[Param] = &[
     Param::new(27, "particles",  20.0,  300.0),
     Param::new(28, "lifetime",   0.5,   4.0),
     Param::new(29, "hue spread", 0.0,   0.5),
+    Param::new(30, "barrage/s",  0.2,   8.0),
 ];
+const P_HUE: usize = 0;
+const P_SHELL_SPEED: usize = 1;
+const P_GRAVITY: usize = 2;
+const P_PARTICLES: usize = 3;
+const P_LIFETIME: usize = 4;
+const P_HUE_SPREAD: usize = 5;
+const P_BARRAGE_RATE: usize = 6;
+
+const VOLLEY_SHELLS: usize = 5;   // shells in one volley, spread across the width
 
 const MAX_SHELLS: usize = 32;
 const MAX_PARTICLES: usize = 12_000;
@@ -228,6 +240,7 @@ struct Shell {
     fuse: f32,
     age: f32,
     form: BurstForm,
+    stream: Stream,
 }
 
 struct Particle {
@@ -236,11 +249,17 @@ struct Particle {
     hue: f32,
     lifetime: f32,
     max_lifetime: f32,
+    stream: Stream,
 }
 
 pub struct Fireworks {
     shells: Vec<Shell>,
     particles: Vec<Particle>,
+    tunes: StreamParams,
+    /// The layer's continuous barrage, toggled by hand.
+    barrage: bool,
+    volley: bool,
+    barrage_accum: f32,
     win: Cell<Rect>,
     mesh_verts: Vec<(Vec3, LinSrgba)>,
     mesh_idx: Vec<usize>,
@@ -256,6 +275,10 @@ impl Fireworks {
         Self {
             shells: Vec::new(),
             particles: Vec::new(),
+            tunes: StreamParams::new(PARAMS.len()),
+            barrage: false,
+            volley: false,
+            barrage_accum: 0.0,
             win: Cell::new(Rect::from_w_h(800.0, 600.0)),
             mesh_verts: Vec::with_capacity((MAX_PARTICLES + MAX_SHELLS) * 4),
             mesh_idx: Vec::with_capacity((MAX_PARTICLES + MAX_SHELLS) * 6),
@@ -265,6 +288,38 @@ impl Fireworks {
             current_tension: 0.0,
             last_form: BurstForm::cycle(0),
         }
+    }
+
+    /// Sends a shell up from the bottom at `x`. `velocity` (0–1) sizes the
+    /// burst; without a `form` the next one in the cycle is used.
+    fn launch(&mut self, x: f32, hue: f32, velocity: f32, form: Option<BurstForm>, stream: Stream, rng: &mut impl Rng) {
+        if self.shells.len() >= MAX_SHELLS { return; }
+        let launch_y = -self.win.get().h() * 0.44;
+        let form = form.unwrap_or_else(|| {
+            let f = BurstForm::cycle(self.form_index);
+            self.form_index += 1;
+            f
+        });
+        self.last_form = form;
+        self.shells.push(Shell {
+            pos: vec2(x, launch_y),
+            vel: vec2(rng.gen_range(-25.0f32..25.0), self.tunes.get(stream, P_SHELL_SPEED)),
+            hue,
+            burst_vel: 80.0 + velocity * 520.0,
+            burst_count: self.tunes.get(stream, P_PARTICLES) as usize,
+            fuse: 2.5,
+            age: 0.0,
+            form,
+            stream,
+        });
+    }
+
+    /// One layer shell at `x`, in the layer's hue (opposite the auto stream's).
+    fn launch_layer(&mut self, x: f32, velocity: f32, rng: &mut impl Rng) {
+        let spread = self.tunes.get(Stream::Layer, P_HUE_SPREAD);
+        let offset = if spread > 0.0 { rng.gen_range(-spread..spread) } else { 0.0 };
+        let hue = (self.tunes.get(Stream::Layer, P_HUE) + LAYER_HUE_SHIFT + offset).rem_euclid(1.0);
+        self.launch(x, hue, velocity, None, Stream::Layer, rng);
     }
 
     fn burst(&mut self, shell: &Shell, lifetime: f32, rng: &mut impl Rng) {
@@ -280,6 +335,7 @@ impl Fireworks {
                 hue: (shell.hue + hue_offset).rem_euclid(1.0),
                 lifetime,
                 max_lifetime: lifetime,
+                stream: shell.stream,
             });
         }
     }
@@ -319,12 +375,10 @@ fn push_quad(
 
 impl Sketch for Fireworks {
     fn update(&mut self, midi: &MidiState, dt: f32) {
-        let base_hue    = PARAMS[0].read(midi);
-        let shell_speed = PARAMS[1].read(midi);
-        let gravity     = PARAMS[2].read(midi);
-        let burst_count = PARAMS[3].read(midi) as usize;
-        let lifetime    = PARAMS[4].read(midi);
-        let hue_spread  = PARAMS[5].read(midi);
+        self.tunes.update(PARAMS, midi);
+        let base_hue     = self.tunes.get(Stream::Auto, P_HUE);
+        let hue_spread   = self.tunes.get(Stream::Auto, P_HUE_SPREAD);
+        let barrage_rate = PARAMS[P_BARRAGE_RATE].read(midi);
 
         let win = self.win.get();
         let height_cap = win.h() * 0.35;
@@ -339,37 +393,41 @@ impl Sketch for Fireworks {
         self.current_chord = chord;
         self.current_tension = tension;
 
-        // Spawn a shell for each note-on event
+        // Auto stream: a shell for each note-on event, pitch → x
         for ev in midi.note_on_events() {
-            if self.shells.len() >= MAX_SHELLS { break; }
             let x = (ev.note as f32 / 127.0 - 0.5) * win.w() * 0.88;
-            let launch_y = -win.h() * 0.44;
             let hue_offset = if hue_spread > 0.0 {
                 rng.gen_range(-hue_spread..hue_spread)
             } else {
                 0.0
             };
             let shell_hue = (chord_hue(chord, base_hue) + hue_offset).rem_euclid(1.0);
-            let form = BurstForm::from_chord(chord).unwrap_or_else(|| {
-                let f = BurstForm::cycle(self.form_index);
-                self.form_index += 1;
-                f
-            });
-            self.last_form = form;
-            self.shells.push(Shell {
-                pos: vec2(x, launch_y),
-                vel: vec2(rng.gen_range(-25.0f32..25.0), shell_speed),
-                hue: shell_hue,
-                burst_vel: 80.0 + ev.velocity * 520.0,
-                burst_count,
-                fuse: 2.5,
-                age: 0.0,
-                form,
-            });
+            self.launch(x, shell_hue, ev.velocity, BurstForm::from_chord(chord), Stream::Auto, &mut rng);
+        }
+
+        // Layer: shells at random spots while the barrage is on, plus a
+        // volley across the whole width when asked for.
+        let half_w = win.w() * 0.44;
+        if self.barrage {
+            self.barrage_accum += barrage_rate * dt;
+            while self.barrage_accum >= 1.0 {
+                self.barrage_accum -= 1.0;
+                let x = rng.gen_range(-half_w..half_w);
+                let velocity = rng.gen_range(0.4f32..1.0);
+                self.launch_layer(x, velocity, &mut rng);
+            }
+        }
+        if std::mem::take(&mut self.volley) {
+            for i in 0..VOLLEY_SHELLS {
+                let t = (i as f32 + 0.5) / VOLLEY_SHELLS as f32;
+                let x = (t * 2.0 - 1.0) * half_w + rng.gen_range(-20.0f32..20.0);
+                self.launch_layer(x, 0.8, &mut rng);
+            }
         }
 
         // Advance shells; dissonant held notes jitter rising trajectories
         for shell in &mut self.shells {
+            let gravity = self.tunes.get(shell.stream, P_GRAVITY);
             shell.vel.y -= gravity * SHELL_GRAV_SCALE * dt;
             shell.pos += shell.vel * dt;
             shell.fuse -= dt;
@@ -383,9 +441,9 @@ impl Sketch for Fireworks {
             // Burst every live shell instantly, then fire a centred mega-ring
             let shells: Vec<Shell> = self.shells.drain(..).collect();
             for shell in &shells {
-                self.burst(shell, lifetime, &mut rng);
+                self.burst(shell, self.tunes.get(shell.stream, P_LIFETIME), &mut rng);
             }
-            let mega_count = (burst_count * 3)
+            let mega_count = (self.tunes.get(Stream::Auto, P_PARTICLES) as usize * 3)
                 .min(MAX_PARTICLES.saturating_sub(self.particles.len()));
             let mega = Shell {
                 pos: Vec2::ZERO,
@@ -396,8 +454,9 @@ impl Sketch for Fireworks {
                 fuse: 0.0,
                 age: 100.0,
                 form: BurstForm::Ring,
+                stream: Stream::Auto,
             };
-            self.burst(&mega, lifetime * 1.5, &mut rng);
+            self.burst(&mega, self.tunes.get(Stream::Auto, P_LIFETIME) * 1.5, &mut rng);
         } else {
             let mut bursting: Vec<Shell> = Vec::new();
             let mut alive: Vec<Shell> = Vec::new();
@@ -413,14 +472,14 @@ impl Sketch for Fireworks {
             }
             self.shells = alive;
             for shell in &bursting {
-                self.burst(shell, lifetime, &mut rng);
+                self.burst(shell, self.tunes.get(shell.stream, P_LIFETIME), &mut rng);
             }
         }
 
         self.prev_chord = chord;
 
         for p in &mut self.particles {
-            p.vel.y -= gravity * dt;
+            p.vel.y -= self.tunes.get(p.stream, P_GRAVITY) * dt;
             p.pos += p.vel * dt;
             p.lifetime -= dt;
         }
@@ -454,11 +513,29 @@ impl Sketch for Fireworks {
                 self.current_tension * 100.0
             )
         };
+        let mut flags = Vec::new();
+        if self.barrage { flags.push("barrage"); }
+        flags.extend(self.tunes.hud_flag());
         Some(format!(
-            "{} shells  {} particles  {}",
+            "{} shells  {} particles  {}{}",
             self.shells.len(),
             self.particles.len(),
-            theory
+            theory,
+            flag_suffix(&flags)
         ))
+    }
+
+    fn actions(&self) -> &[(Key, &'static str)] {
+        &[(Key::G, "Barrage"), (Key::B, "Volley"), (Key::T, "Tune: both / auto / layer"), (Key::R, "Clear")]
+    }
+
+    fn key_pressed(&mut self, key: Key) {
+        match key {
+            Key::G => { self.barrage = !self.barrage; self.barrage_accum = 0.0; }
+            Key::B => self.volley = true,
+            Key::T => self.tunes.target = self.tunes.target.next(),
+            Key::R => { self.shells.clear(); self.particles.clear(); }
+            _ => {}
+        }
     }
 }

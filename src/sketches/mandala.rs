@@ -1,20 +1,27 @@
 use crate::midi::{MidiState, NoteState};
-use crate::sketches::{Param, Sketch};
+use crate::sketches::{flag_suffix, Param, Sketch, Smoothed, Stream, StreamParams, LAYER_HUE_SHIFT};
 use nannou::prelude::*;
 use std::cell::Cell;
 use std::collections::HashSet;
 
+// All four are kept per stream and follow the tune target.
 const PARAMS: &[Param] = &[
     Param::new(1,  "hue",   0.0, 1.0),
     Param::new(24, "speed", 0.1, 3.0),
     Param::new(25, "size",  0.3, 0.95),
     Param::new(26, "sat",   0.2, 1.0),
 ];
+const P_HUE: usize = 0;
+const P_SPEED: usize = 1;
+const P_SIZE: usize = 2;
+const P_SAT: usize = 3;
 
 const ENERGY_WINDOW: f32 = 4.0;
 const ENERGY_PEAK:   f32 = 20.0;
 const BEZ_SEGS:      usize = 18;
 const MORPH_SPEED:   f32 = 2.4;  // seconds to cross-fade: 1/2.4 ≈ 0.42s
+const LAYER_ROT:     usize = 7;  // ring_rot slot of the layer's halo
+const SURGE_SECS:    f32 = 1.2;  // how long a surge stretches the halo
 
 // ── Petal forms ───────────────────────────────────────────────────────────────
 
@@ -276,6 +283,11 @@ fn flame_pts(half_len: f32, half_w: f32, sweep: f32) -> Vec<Vec2> {
 struct Pulse { radius: f32, max_r: f32, alpha: f32, hue: f32 }
 struct Blip  { x: f32, y: f32, life: f32, size: f32, hue: f32 }
 
+/// What a ring is drawn with, beyond its spec: the stream's hue and
+/// saturation, how far its petals stretch, and an alpha multiplier.
+#[derive(Clone, Copy)]
+struct RingStyle { hue: f32, sat: f32, stretch: f32, alpha: f32 }
+
 // ── Sketch ────────────────────────────────────────────────────────────────────
 
 pub struct Mandala {
@@ -283,7 +295,7 @@ pub struct Mandala {
     symmetry:        usize,
     current_specs:   Vec<RingSpec>,
     morph:           Option<SymmetryMorph>,
-    // ring_rot[0..5] = ring slots, [6] = border dots
+    // ring_rot[0..5] = ring slots, [6] = border dots, [7] = layer halo
     ring_rot:        [f32; 8],
     flash_alpha:     f32,
     flash_hue:       f32,
@@ -295,7 +307,14 @@ pub struct Mandala {
     time:            f32,
     pulses:          Vec<Pulse>,
     blips:           Vec<Blip>,
+    // The auto stream's knob values
     p_hue: f32, p_speed: f32, p_size: f32, p_sat: f32,
+    tunes:           StreamParams,
+    // Layer: a halo of petals round the mandala, played by hand
+    layer_on:        bool,
+    layer_spec:      RingSpec,
+    s_layer_alpha:   Smoothed,  // fades the halo in and out
+    surge:           f32,       // 1 right after a surge, falling to 0
     win:             Cell<Rect>,
 }
 
@@ -319,8 +338,22 @@ impl Mandala {
             pulses:          Vec::new(),
             blips:           Vec::new(),
             p_hue: 0.5, p_speed: 1.0, p_size: 0.7, p_sat: 0.8,
+            tunes:           StreamParams::new(PARAMS.len()),
+            layer_on:        false,
+            layer_spec:      rs(0.78, 2.0, PetalForm::Lotus, -1.0, 1.3, 0.50, 0.0, 0.58, 0.85, true),
+            s_layer_alpha:   Smoothed::new(0.0, 3.0),
+            surge:           0.0,
             win: Cell::new(Rect::from_w_h(800.0, 600.0)),
         }
+    }
+
+    fn layer_hue(&self) -> f32 {
+        (self.tunes.get(Stream::Layer, P_HUE) + LAYER_HUE_SHIFT).rem_euclid(1.0)
+    }
+
+    /// Radius of the layer's halo.
+    fn layer_r(&self, win: Rect) -> f32 {
+        self.layer_spec.r_frac * Self::max_r(win, self.tunes.get(Stream::Layer, P_SIZE))
     }
 
     fn max_r(win: Rect, size: f32) -> f32 {
@@ -328,15 +361,15 @@ impl Mandala {
     }
 
     fn draw_ring(&self, draw: &Draw, cx: f32, cy: f32, max_r: f32,
-                 spec: &RingSpec, rot: f32, n_base: usize, alpha_mult: f32) {
+                 spec: &RingSpec, rot: f32, n_base: usize, style: RingStyle) {
         let n        = ((n_base as f32 * spec.n_mult).round() as usize).max(1);
         let ring_r   = spec.r_frac * max_r;
         let spacing  = max_r * 0.10;
-        let p_len    = spec.len_mult * spacing * (1.0 + self.tension * 0.48);
+        let p_len    = spec.len_mult * spacing * style.stretch;
         let p_wid    = spec.wid_mult * spacing;
-        let base_hue = (self.chord.hue(self.p_hue) + spec.hue_off).rem_euclid(1.0);
-        let sat      = self.p_sat;
-        let ea       = spec.alpha * alpha_mult;  // effective alpha
+        let base_hue = (style.hue + spec.hue_off).rem_euclid(1.0);
+        let sat      = style.sat;
+        let ea       = spec.alpha * style.alpha;  // effective alpha
         let stroke_c = hsla(base_hue, sat, spec.lum, ea);
 
         match &spec.form {
@@ -509,11 +542,19 @@ impl Sketch for Mandala {
     fn params(&self) -> &[Param] { PARAMS }
 
     fn update(&mut self, midi: &MidiState, dt: f32) {
-        self.p_hue   = PARAMS[0].read(midi);
-        self.p_speed = PARAMS[1].read(midi);
-        self.p_size  = PARAMS[2].read(midi);
-        self.p_sat   = PARAMS[3].read(midi);
+        self.tunes.update(PARAMS, midi);
+        self.p_hue   = self.tunes.get(Stream::Auto, P_HUE);
+        self.p_speed = self.tunes.get(Stream::Auto, P_SPEED);
+        self.p_size  = self.tunes.get(Stream::Auto, P_SIZE);
+        self.p_sat   = self.tunes.get(Stream::Auto, P_SAT);
         self.time   += dt;
+
+        // Layer: the halo turns against the mandala at a steady pace (it
+        // doesn't speed up with the notes) and stretches after a surge.
+        let layer_speed = self.tunes.get(Stream::Layer, P_SPEED);
+        self.ring_rot[LAYER_ROT] += self.layer_spec.spin * 0.25 * layer_speed * dt;
+        self.s_layer_alpha.drive(if self.layer_on { 1.0 } else { 0.0 }, dt);
+        self.surge = (self.surge - dt / SURGE_SECS).max(0.0);
 
         for _ in midi.note_on_events() { self.note_timestamps.push(self.time); }
         self.note_timestamps.retain(|&t| self.time - t < ENERGY_WINDOW);
@@ -603,8 +644,29 @@ impl Sketch for Mandala {
 
         self.draw_flash(draw, win);
 
+        // Layer halo, outermost so drawn first. A surge shows it for a
+        // moment even while it's off.
+        let layer_alpha = self.s_layer_alpha.value.max(self.surge);
+        if layer_alpha > 0.01 {
+            let style = RingStyle {
+                hue:     self.layer_hue(),
+                sat:     self.tunes.get(Stream::Layer, P_SAT),
+                stretch: 1.0 + self.surge * 0.8,
+                alpha:   layer_alpha,
+            };
+            let layer_max_r = Self::max_r(win, self.tunes.get(Stream::Layer, P_SIZE));
+            self.draw_ring(draw, cx, cy, layer_max_r, &self.layer_spec,
+                           self.ring_rot[LAYER_ROT], self.symmetry, style);
+        }
+
         // Draw rings: outer → inner so inner renders on top.
         // During a symmetry morph, cross-fade old form out and new form in.
+        let style = |alpha| RingStyle {
+            hue:     self.chord.hue(self.p_hue),
+            sat:     self.p_sat,
+            stretch: 1.0 + self.tension * 0.48,
+            alpha,
+        };
         match &self.morph {
             Some(m) if m.t < 1.0 => {
                 let a_old = ease_out(1.0 - m.t);
@@ -612,18 +674,18 @@ impl Sketch for Mandala {
                 // Old form fading out
                 for (i, spec) in m.from_specs.iter().enumerate().rev() {
                     self.draw_ring(draw, cx, cy, max_r, spec,
-                                   self.ring_rot[i], m.from_n, a_old);
+                                   self.ring_rot[i], m.from_n, style(a_old));
                 }
                 // New form fading in
                 for (i, spec) in self.current_specs.iter().enumerate().rev() {
                     self.draw_ring(draw, cx, cy, max_r, spec,
-                                   self.ring_rot[i], self.symmetry, a_new);
+                                   self.ring_rot[i], self.symmetry, style(a_new));
                 }
             }
             _ => {
                 for (i, spec) in self.current_specs.iter().enumerate().rev() {
                     self.draw_ring(draw, cx, cy, max_r, spec,
-                                   self.ring_rot[i], self.symmetry, 1.0);
+                                   self.ring_rot[i], self.symmetry, style(1.0));
                 }
             }
         }
@@ -636,15 +698,33 @@ impl Sketch for Mandala {
 
     fn hud_info(&self) -> Option<String> {
         let (a, b) = self.lis_ratio;
-        Some(format!("{} | e:{:.0}% t:{:.0}% | lis {}:{}",
-            self.chord.label(), self.energy * 100.0, self.tension * 100.0, a, b))
+        let mut flags = Vec::new();
+        if self.layer_on { flags.push("layer"); }
+        flags.extend(self.tunes.hud_flag());
+        Some(format!("{} | e:{:.0}% t:{:.0}% | lis {}:{}{}",
+            self.chord.label(), self.energy * 100.0, self.tension * 100.0, a, b,
+            flag_suffix(&flags)))
     }
 
     fn actions(&self) -> &[(Key, &'static str)] {
-        &[(Key::R, "Reset")]
+        &[(Key::G, "Layer"), (Key::B, "Surge"), (Key::T, "Tune: both / auto / layer"), (Key::R, "Reset")]
     }
 
     fn key_pressed(&mut self, key: Key) {
-        if key == Key::R { *self = Self::new(); }
+        match key {
+            Key::G => self.layer_on = !self.layer_on,
+            Key::B => {
+                // Stretch the halo and send a pulse outward from it.
+                self.surge = 1.0;
+                let r = self.layer_r(self.win.get());
+                self.pulses.push(Pulse {
+                    radius: r, max_r: r * 1.6,
+                    alpha: 0.9, hue: self.layer_hue(),
+                });
+            }
+            Key::T => self.tunes.target = self.tunes.target.next(),
+            Key::R => *self = Self::new(),
+            _ => {}
+        }
     }
 }

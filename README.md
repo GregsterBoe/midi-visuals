@@ -49,10 +49,31 @@ alike. Anything on MIDI channel 10 (the pads' default) counts as a pad; the keys
 
 | Bank | Pads 1–8 |
 |------|----------|
-| A (notes 36–43) | The active sketch's actions, in the order of its panel buttons (e.g. droplets: Flow, Surge, Tune, Clear; rings: Rain, Gravity, Push / pull, Clear) |
+| A (notes 36–43) | The active sketch's actions, in the order of its panel buttons. Pads 1–3 are the same in every sketch: layer on / off, surge, tune (see [Two streams](#two-streams)); the sketch's own actions follow (e.g. rings: Rain, Halo, Tune, Clear, Gravity, Push / pull) |
 | B (notes 44–51) | Next sketch, MIDI / audio, HUD, Load preset |
 
 Pad 1 is bottom left, pad 5 top left. The panel shows each pad's action and lights it while held.
+
+## Two streams
+
+Every sketch draws two streams:
+
+- **Auto** follows the notes you play (MIDI or audio).
+- **Layer** is played by hand on top of it, in the opposite hue. Pad 1 (`G`) switches it on
+  and off; pad 2 (`B`) fires a one-off surge, which shows for a moment even while the layer is off.
+
+The knobs tune both streams at once. Pad 3 (`T`) switches them to tune only the auto stream,
+then only the layer, then both again. The stream not being tuned keeps its values, so the two can
+drift apart. The HUD shows `tune auto` or `tune layer` while only one is tuned.
+
+| Sketch | Layer (pad 1, `G`) | Surge (pad 2, `B`) | Knobs that aren't per stream |
+|---|---|---|---|
+| cardano | a circle system turning the other way, which ignores the notes | Kick: knocks the layer's circles out of orbit | align, trail |
+| droplets | a flow of droplets through a band | Surge: a burst across the band | decay (shared); flow rate, y, width (layer only) |
+| fireworks | a barrage of shells at random spots | Volley: five shells across the width | barrage rate (CC30, layer only) |
+| kaleidoscope | the contour lines of a second pattern | Surge: thickens and brightens the lines | smooth |
+| mandala | a halo of petals round the mandala, turning against it | Surge: stretches the halo and sends a pulse out | — |
+| rings | rain from a turning point round the centre | Halo: twelve rings round the centre at once | rain rate, spread (layer only) |
 
 The HUD (top-left) shows the active sketch name, current FPS, and a green dot that flashes on any note or knob input.
 Presets are saved per-sketch in `presets/<sketch_name>.txt`. CC 31 scrolls through saved presets.
@@ -146,10 +167,13 @@ Key bindings:
 
 | Key | Action                              |
 |-----|-------------------------------------|
-| `C` | Cycle collections 1 → 2 → 3 → 4 → 1 |
+| `G` | Layer on / off                      |
+| `B` | Kick the layer                      |
+| `T` | Knobs tune: both → auto → layer     |
 | `R` | Clear trail                         |
+| `C` | Cycle collections 1 → 2 → 3 → 4 → 1 |
 
-HUD shows `NxM circles  F frames` (collections × circles per collection, trail frames).
+HUD shows `NxM circles` (collections × circles per collection), the chord and tension.
 
 ---
 
@@ -193,8 +217,16 @@ Note-on events launch glowing shells upward, positioned by note pitch. Each shel
 | 27 | Particles   | 20 – 300 per burst |
 | 28 | Lifetime    | 0.5 – 4.0 s |
 | 29 | Hue spread  | 0 – 0.5     |
+| 30 | Barrage rate| 0.2 – 8 shells/s (layer) |
 
 Note pitch maps the launch X position (low notes = left, high notes = right). Note velocity maps to explosion radius — a soft press makes a small tight burst, a hard press makes a large expansive one.
+
+| Key | Action |
+|-----|--------|
+| `G` | Barrage on / off |
+| `B` | Volley |
+| `T` | Knobs tune: both → auto → layer |
+| `R` | Clear |
 
 HUD shows live shell and particle counts.
 
@@ -216,10 +248,12 @@ Key bindings:
 
 | Key | Action                              |
 |-----|-------------------------------------|
-| `G` | Toggle rain mode                    |
+| `G` | Toggle rain (the layer)             |
+| `B` | Halo                                |
+| `T` | Knobs tune: both → auto → layer     |
+| `R` | Clear all rings                     |
 | `O` | Toggle gravity                      |
 | `K` | Flip gravity between push and pull  |
-| `R` | Clear all rings                     |
 
 HUD shows ring count and active modes.
 

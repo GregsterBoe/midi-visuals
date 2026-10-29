@@ -1,10 +1,12 @@
 use crate::midi::{MidiState, NoteState};
-use crate::sketches::{Param, Sketch, Smoothed};
+use crate::sketches::{flag_suffix, Param, Sketch, Smoothed, Stream, StreamParams, LAYER_HUE_SHIFT};
 use bytemuck::{Pod, Zeroable};
 use nannou::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 
+// hue, speed, freq and warp are kept per stream and follow the tune target;
+// smooth shapes both.
 const PARAMS: &[Param] = &[
     Param::new(1,  "hue",    0.0,  1.0),
     Param::new(24, "speed",  0.1,  3.0),
@@ -12,6 +14,11 @@ const PARAMS: &[Param] = &[
     Param::new(26, "warp",   0.0,  1.4),
     Param::new(27, "smooth", 0.0,  1.0),  // 0=punchy, 1=dreamy
 ];
+const P_HUE: usize = 0;
+const P_SPEED: usize = 1;
+const P_FREQ: usize = 2;
+const P_WARP: usize = 3;
+const P_SMOOTH: usize = 4;
 
 const ENERGY_WINDOW: f32 = 4.0;
 const ENERGY_PEAK:   f32 = 20.0;
@@ -36,6 +43,14 @@ struct Uniforms {
     moire_delta:  f32,
     pattern_mode: f32,
     threshold:    f32,
+    layer_mix:    f32,
+    layer_freq:   f32,
+    layer_warp:   f32,
+    layer_speed:  f32,
+    layer_onset:  f32,
+    layer_hue:    f32,
+    _pad0:        f32,
+    _pad1:        f32,
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -88,7 +103,7 @@ fn kfold(uv_in: vec2<f32>, n: f32) -> vec2<f32> {
 }
 
 // Returns a value in [-1, 1] representing the pattern at warped uv.
-fn base_pattern(uv: vec2<f32>, freq: f32, t: f32, warp: f32, mode: u32) -> f32 {
+fn base_pattern(uv: vec2<f32>, freq: f32, t: f32, warp: f32, mode: u32, speed: f32) -> f32 {
     // Two-pass domain warp (Quilez style)
     let q = vec2<f32>(
         fbm(uv * 2.0 + vec2<f32>(0.0,  t * 0.05)),
@@ -104,7 +119,7 @@ fn base_pattern(uv: vec2<f32>, freq: f32, t: f32, warp: f32, mode: u32) -> f32 {
         case 3u: { r = sin(freq * 0.5 * w.x) * sin(freq * 0.5 * w.y); } // checker
         default: { r = length(w); }                              // rings
     }
-    return sin(freq * r - t * u.speed + 6.0 * fbm(w * 1.5));
+    return sin(freq * r - t * speed + 6.0 * fbm(w * 1.5));
 }
 
 fn hsl_to_rgb(h: f32, s: f32, l: f32) -> vec3<f32> {
@@ -133,11 +148,11 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let mode = u32(u.pattern_mode);
 
     // Primary pattern
-    let f0 = base_pattern(uv, freq, u.time, warp, mode);
+    let f0 = base_pattern(uv, freq, u.time, warp, mode, u.speed);
 
     // Moiré: second pass at a slightly different scale and frequency
     let uv1  = kfold(uv_raw * 1.004, u.n_sym);
-    let f1   = base_pattern(uv1, freq + u.moire_delta, u.time, warp, mode);
+    let f1   = base_pattern(uv1, freq + u.moire_delta, u.time, warp, mode, u.speed);
     let moir = abs(f0 - f1);
 
     let raw  = mix(f0, moir, u.moire_mix);
@@ -153,6 +168,19 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         case 1u: { out = col; }
         case 2u: { out = inv; }
         default: { out = bw; }
+    }
+
+    // Layer: the contour lines of a second pattern with its own knobs,
+    // drawn over the first in the opposite hue. A surge thickens and
+    // brightens them.
+    if (u.layer_mix > 0.001) {
+        let lf    = u.layer_freq + u.layer_onset * 6.0;
+        let lw    = u.layer_warp + u.layer_onset * 0.6;
+        let fl    = base_pattern(uv, lf, u.time, lw, mode, u.layer_speed);
+        let width = 0.10 + u.layer_onset * 0.25;
+        let line  = 1.0 - smoothstep(0.0, width, abs(fl));
+        let lcol  = hsl_to_rgb(fract(u.layer_hue), u.sat, 0.55 + u.layer_onset * 0.3);
+        out = mix(out, lcol, line * u.layer_mix);
     }
     return vec4<f32>(out, 1.0);
 }
@@ -178,8 +206,15 @@ struct KalUniforms {
     moire_delta:  f32,
     pattern_mode: f32,
     threshold:    f32,
+    layer_mix:    f32,
+    layer_freq:   f32,
+    layer_warp:   f32,
+    layer_speed:  f32,
+    layer_onset:  f32,
+    layer_hue:    f32,
+    _pad:         [f32; 2],  // keeps the size a multiple of 16
 }
-const _: () = assert!(std::mem::size_of::<KalUniforms>() == 64);
+const _: () = assert!(std::mem::size_of::<KalUniforms>() == 96);
 
 // ── Chord detection ───────────────────────────────────────────────────────────
 
@@ -372,6 +407,17 @@ pub struct Kaleidoscope {
     s_onset:   Smoothed,  // smoothed onset — rate set dynamically by smooth knob
     s_smooth:  Smoothed,  // CC smooth knob: 0=punchy, 1=dreamy
 
+    // Layer: a second pattern played by hand, with its own knob values
+    tunes:           StreamParams,
+    layer_on:        bool,
+    layer_onset_raw: f32,       // surge impulse, decays like the note onset
+    s_layer_mix:     Smoothed,  // fades the layer in and out
+    s_layer_onset:   Smoothed,
+    s_layer_hue:     Smoothed,
+    s_layer_freq:    Smoothed,
+    s_layer_speed:   Smoothed,
+    s_layer_warp:    Smoothed,
+
     color_mode:   u32,  // 0=B&W  1=color  2=inverted
     moire_on:     bool,
     pattern_mode: u32,  // 0=rings  1=stripes  2=diagonal  3=checker
@@ -399,6 +445,16 @@ impl Kaleidoscope {
             s_onset:   Smoothed::new(0.0,  4.0),
             s_smooth:  Smoothed::new(0.0,  6.0),
 
+            tunes:           StreamParams::new(PARAMS.len()),
+            layer_on:        false,
+            layer_onset_raw: 0.0,
+            s_layer_mix:     Smoothed::new(0.0,  3.0),
+            s_layer_onset:   Smoothed::new(0.0,  4.0),
+            s_layer_hue:     Smoothed::new(0.5,  2.0),
+            s_layer_freq:    Smoothed::new(18.0, 6.0),
+            s_layer_speed:   Smoothed::new(0.8,  6.0),
+            s_layer_warp:    Smoothed::new(0.6,  6.0),
+
             color_mode:   0,
             moire_on:     false,
             pattern_mode: 0,
@@ -422,14 +478,22 @@ impl Sketch for Kaleidoscope {
     fn update(&mut self, midi: &MidiState, dt: f32) {
         self.time += dt;
 
+        self.tunes.update(PARAMS, midi);
+
         // Read smooth knob first so its value informs this frame's rates.
-        self.s_smooth.drive(PARAMS[4].read(midi), dt);
+        self.s_smooth.drive(PARAMS[P_SMOOTH].read(midi), dt);
         let smooth = self.s_smooth.value; // 0=punchy, 1=dreamy
 
         // CC knobs — IIR filter removes 7-bit MIDI staircase artifacts
-        self.s_speed.drive(PARAMS[1].read(midi), dt);
-        self.s_freq.drive(PARAMS[2].read(midi),  dt);
-        self.s_warp.drive(PARAMS[3].read(midi),  dt);
+        let (auto, layer) = (Stream::Auto, Stream::Layer);
+        self.s_speed.drive(self.tunes.get(auto, P_SPEED), dt);
+        self.s_freq.drive(self.tunes.get(auto, P_FREQ),   dt);
+        self.s_warp.drive(self.tunes.get(auto, P_WARP),   dt);
+        self.s_layer_speed.drive(self.tunes.get(layer, P_SPEED), dt);
+        self.s_layer_freq.drive(self.tunes.get(layer, P_FREQ),   dt);
+        self.s_layer_warp.drive(self.tunes.get(layer, P_WARP),   dt);
+        self.s_layer_hue.drive(self.tunes.get(layer, P_HUE) + LAYER_HUE_SHIFT, dt);
+        self.s_layer_mix.drive(if self.layer_on { 1.0 } else { 0.0 }, dt);
 
         // Onset: additive impulse on each note, then exponential decay.
         // The raw value is then routed through s_onset so the RISE is also
@@ -446,6 +510,11 @@ impl Sketch for Kaleidoscope {
         // Rate also scaled by smooth knob: 4.0 (quick) → 1.5 (dreamy)
         self.s_onset.rate = 4.0 - smooth * 2.5;
         self.s_onset.drive(self.onset_raw, dt);
+
+        // The layer's surge rises and falls the same way.
+        self.layer_onset_raw *= (-dt * onset_decay).exp();
+        self.s_layer_onset.rate = self.s_onset.rate;
+        self.s_layer_onset.drive(self.layer_onset_raw, dt);
 
         // Energy: note density over ENERGY_WINDOW seconds, tracked more lazily
         // than before (rate 2.0 vs 3.0 — softer peaks when playing fast).
@@ -467,7 +536,7 @@ impl Sketch for Kaleidoscope {
         // Because n_sym is a float in kfold(), values like 6.3 or 7.7 produce
         // real intermediate geometries — the morph is a visible transition.
         self.s_n_sym.drive(self.chord.n_sym(), dt);
-        self.s_hue.drive(self.chord.hue(PARAMS[0].read(midi)), dt);
+        self.s_hue.drive(self.chord.hue(self.tunes.get(auto, P_HUE)), dt);
     }
 
     fn view(&self, draw: &Draw, win: Rect) {
@@ -481,8 +550,11 @@ impl Sketch for Kaleidoscope {
     fn hud_info(&self) -> Option<String> {
         let mode_str = ["B&W", "color", "inv"][self.color_mode as usize];
         let pat_str  = ["rings", "stripes", "diag", "checker"][self.pattern_mode as usize];
+        let mut flags = Vec::new();
+        if self.layer_on { flags.push("layer"); }
+        flags.extend(self.tunes.hud_flag());
         Some(format!(
-            "{} | e:{:.0}% t:{:.0}% smooth:{:.0}% | {} {} {}",
+            "{} | e:{:.0}% t:{:.0}% smooth:{:.0}% | {} {} {}{}",
             self.chord.label(),
             self.energy * 100.0,
             self.s_tension.value * 100.0,
@@ -490,15 +562,26 @@ impl Sketch for Kaleidoscope {
             mode_str,
             pat_str,
             if self.moire_on { "moiré" } else { "" },
+            flag_suffix(&flags),
         ))
     }
 
     fn actions(&self) -> &[(Key, &'static str)] {
-        &[(Key::C, "Colour mode"), (Key::M, "Moiré"), (Key::P, "Pattern")]
+        &[
+            (Key::G, "Layer"),
+            (Key::B, "Surge"),
+            (Key::T, "Tune: both / auto / layer"),
+            (Key::C, "Colour mode"),
+            (Key::M, "Moiré"),
+            (Key::P, "Pattern"),
+        ]
     }
 
     fn key_pressed(&mut self, key: Key) {
         match key {
+            Key::G => self.layer_on = !self.layer_on,
+            Key::B => self.layer_onset_raw = 1.0,
+            Key::T => self.tunes.target = self.tunes.target.next(),
             Key::C => self.color_mode   = (self.color_mode   + 1) % 3,
             Key::M => self.moire_on     = !self.moire_on,
             Key::P => self.pattern_mode = (self.pattern_mode + 1) % 4,
@@ -542,6 +625,14 @@ impl Sketch for Kaleidoscope {
                 moire_delta:  2.0,
                 pattern_mode: self.pattern_mode as f32,
                 threshold:    0.015,
+                // A surge shows the layer for a moment even while it's off.
+                layer_mix:    self.s_layer_mix.value.max(self.s_layer_onset.value),
+                layer_freq:   self.s_layer_freq.value,
+                layer_warp:   self.s_layer_warp.value,
+                layer_speed:  self.s_layer_speed.value,
+                layer_onset:  self.s_layer_onset.value,
+                layer_hue:    self.s_layer_hue.value.rem_euclid(1.0),
+                _pad:         [0.0; 2],
             }),
         );
 

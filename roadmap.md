@@ -31,7 +31,7 @@ Three layers. **`main.rs`** owns the Nannou window and the active sketch. **`mid
 | 18 | Audio input — `A` switches notes MIDI ↔ audio; engines basic-pitch / swift-f0 / dsp-poly (`E`); `--probe` / `--listen` tools | `[DONE]` |
 | 19 | Control panel — local web page (127.0.0.1:7878, `W`) for sketches, knobs, presets, audio source/engine/gate and the log | `[DONE]` |
 | 20 | Remove `chess` + `particles` — focus on smooth, music-driven visuals | `[DONE]` |
-| 21 | Two-stream model: automatic note-driven stream + hand-played layer in the opposite hue, knobs tune both or one (`StreamParams`); first in `droplets` | `[IN PROGRESS]` |
+| 21 | Two-stream model: automatic note-driven stream + hand-played layer in the opposite hue, knobs tune both or one (`StreamParams`); in every sketch, pads 1–3 = layer / surge / tune | `[DONE]` |
 | 22 | MPK pads (channel 10) as action triggers: bank A = sketch actions, bank B = app actions; drawn, lit and re-mappable in the panel | `[DONE]` |
 
 ---

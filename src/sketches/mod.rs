@@ -85,14 +85,6 @@ impl TuneTarget {
             TuneTarget::Layer => TuneTarget::Both,
         }
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            TuneTarget::Both => "both",
-            TuneTarget::Auto => "auto",
-            TuneTarget::Layer => "layer",
-        }
-    }
 }
 
 /// A value per stream for each of a sketch's params. A knob that moves sets
@@ -129,6 +121,24 @@ impl StreamParams {
             Stream::Layer => self.layer[i],
         }
     }
+
+    /// HUD flag while the knobs tune only one stream.
+    pub fn hud_flag(&self) -> Option<&'static str> {
+        match self.target {
+            TuneTarget::Both => None,
+            TuneTarget::Auto => Some("tune auto"),
+            TuneTarget::Layer => Some("tune layer"),
+        }
+    }
+}
+
+/// How far round the colour wheel (in turns) the layer sits from its hue
+/// knob, so it is drawn opposite the auto stream while both share a hue.
+pub const LAYER_HUE_SHIFT: f32 = 0.5;
+
+/// "  [rain+tune auto]"-style suffix for a HUD line; empty without flags.
+pub fn flag_suffix(flags: &[&str]) -> String {
+    if flags.is_empty() { String::new() } else { format!("  [{}]", flags.join("+")) }
 }
 
 pub trait Sketch {

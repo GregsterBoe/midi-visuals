@@ -1,5 +1,5 @@
 use crate::midi::MidiState;
-use crate::sketches::{Param, Sketch, Stream, StreamParams, TuneTarget};
+use crate::sketches::{flag_suffix, Param, Sketch, Stream, StreamParams};
 use nannou::prelude::*;
 use nannou::rand::{thread_rng, Rng};
 use std::cell::{Cell, RefCell};
@@ -644,12 +644,9 @@ impl Sketch for Droplets {
         let active = self.influence.iter().filter(|&&v| v >= INFLUENCE_THRESHOLD).count();
         let sat = active as f32 / (self.cols * self.rows) as f32;
         let mut flags = Vec::new();
-        if self.flow { flags.push("flow".to_string()); }
-        if self.tunes.target != TuneTarget::Both {
-            flags.push(format!("tune {}", self.tunes.target.label()));
-        }
-        let suffix = if flags.is_empty() { String::new() } else { format!("  [{}]", flags.join("+")) };
-        Some(format!("{} droplets  sat {:.0}%{suffix}", self.droplets.len(), sat * 100.0))
+        if self.flow { flags.push("flow"); }
+        flags.extend(self.tunes.hud_flag());
+        Some(format!("{} droplets  sat {:.0}%{}", self.droplets.len(), sat * 100.0, flag_suffix(&flags)))
     }
 
     fn actions(&self) -> &[(Key, &'static str)] {
