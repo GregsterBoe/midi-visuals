@@ -105,18 +105,24 @@ impl AudioSettings {
 }
 
 /// Which MIDI control sits where on the controller, so the panel can draw
-/// it. Defaults to the MPK mini: two wheels left of the pads, then two rows of
-/// four knobs. Slots are re-learned from the panel when they don't match.
+/// it. Defaults to the MPK mini: two wheels, two rows of four knobs, and two
+/// banks of eight pads (A then B, each numbered from the bottom left). Slots
+/// are re-learned from the panel when they don't match.
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ControllerLayout {
     pub wheels: Vec<Control>,
     pub knobs: Vec<Control>,
+    pub pads: Vec<Control>,
 }
 
 impl Default for ControllerLayout {
     fn default() -> Self {
-        Self { wheels: vec![Control::PitchBend, Control::Cc(1)], knobs: (24..=31).map(Control::Cc).collect() }
+        Self {
+            wheels: vec![Control::PitchBend, Control::Cc(1)],
+            knobs: (24..=31).map(Control::Cc).collect(),
+            pads: (36..=51).map(Control::Pad).collect(),
+        }
     }
 }
 
@@ -137,10 +143,12 @@ impl ControllerLayout {
         }
     }
 
-    /// Puts `control` in a slot (wheels first, then knobs). If another slot
-    /// had it, that slot takes this one's old control, so nothing is lost.
+    /// Puts `control` in a slot (wheels first, then knobs, then pads). If
+    /// another slot had it, that slot takes this one's old control, so
+    /// nothing is lost.
     pub fn assign(&mut self, slot: usize, control: Control) {
-        let mut slots: Vec<&mut Control> = self.wheels.iter_mut().chain(self.knobs.iter_mut()).collect();
+        let mut slots: Vec<&mut Control> =
+            self.wheels.iter_mut().chain(self.knobs.iter_mut()).chain(self.pads.iter_mut()).collect();
         let Some(old) = slots.get(slot).map(|c| **c) else { return };
         if let Some(other) = slots.iter_mut().find(|c| ***c == control) {
             **other = old;

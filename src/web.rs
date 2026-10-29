@@ -73,6 +73,8 @@ pub enum Command {
     Sketch { idx: usize },
     /// One of the active sketch's `actions()`.
     Action { idx: usize },
+    /// A pad slot, as if hit on the controller (bank A's 8, then bank B's).
+    Pad { slot: usize },
     Input { audio: bool },
     Engine { idx: usize },
     Gate { db: f32 },
@@ -82,7 +84,7 @@ pub enum Command {
     Cc { cc: u8, value: f32 },
     /// The pitch wheel, in [0, 1] with 0.5 at rest.
     Bend { value: f32 },
-    /// Puts a control in a controller slot (wheels first, then knobs).
+    /// Puts a control in a controller slot (wheels, then knobs, then pads).
     Assign { slot: usize, control: Control },
     ResetLayout,
     LoadPreset { idx: usize },
@@ -97,11 +99,15 @@ pub struct Status {
     pub sketch: usize,
     pub info: Option<String>,
     pub actions: Vec<&'static str>,
+    /// What bank B's pads do.
+    pub app_actions: Vec<&'static str>,
     pub params: Vec<ParamStatus>,
     pub layout: ControllerLayout,
     /// Every CC's position in [0, 1], so unused knobs move on the page too.
     pub ccs: Vec<f32>,
     pub pitch_bend: f32,
+    /// How hard each pad (by note) is pressed, in [0, 1].
+    pub pads: Vec<f32>,
     pub last_control: Option<Control>,
     pub control_moves: u64,
     /// The knob that scrolls through presets.

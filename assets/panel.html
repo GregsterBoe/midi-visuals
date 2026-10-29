@@ -155,6 +155,19 @@
   .slot .fill { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 0 0 7px 7px; background: rgba(124, 156, 255, 0.18); }
   .ctl.hit .dial .face, .ctl.hit .slot { stroke: var(--good); border-color: var(--good); box-shadow: 0 0 10px rgba(76, 209, 138, .35); }
   .dial:focus-visible, .slot:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  /* Pads: one bank of 2 x 4 at a time, pad 1 bottom left like on the MPK. */
+  .mpk { flex-wrap: wrap; }
+  .pad-box { flex-basis: 100%; order: 3; border-top: 1px solid var(--line); padding-top: 10px; }
+  .pad-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .pad-head .hint { margin: 0; }
+  .pad-head .seg button { padding: 3px 12px; font-size: 12px; }
+  .pads { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px 8px; }
+  .pad { width: 100%; height: 46px; padding: 4px 6px; border-radius: 7px; font-size: 12px; line-height: 1.15;
+    display: flex; align-items: center; justify-content: center; text-align: center; overflow: hidden; overflow-wrap: anywhere;
+    background: color-mix(in srgb, var(--good) calc(var(--lvl, 0) * 70%), #262a35); border-color: #343947; }
+  .pad.down { border-color: var(--good); color: #fff; }
+  .unused .pad { color: var(--faint); font-style: italic; cursor: default; }
+  .ctl.hit .pad { border-color: var(--good); box-shadow: 0 0 10px rgba(76, 209, 138, .35); }
   .layout-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
   .layout-row .hint { margin: 0; flex: 1; }
   @media (max-width: 480px) {
@@ -211,9 +224,16 @@
       <div class="mpk">
         <div class="wheels" id="wheels"></div>
         <div class="knobs" id="knobs"></div>
+        <div class="pad-box">
+          <div class="pad-head">
+            <span class="seg"><button id="bank-a">Bank A</button><button id="bank-b">Bank B</button></span>
+            <p class="hint" id="bank-hint"></p>
+          </div>
+          <div class="pads" id="pads"></div>
+        </div>
       </div>
       <div class="layout-row">
-        <p class="hint" id="learn-hint">Drag a knob up or down to turn it. If a knob here doesn't match your MPK, click its CC label and move the real one.</p>
+        <p class="hint" id="learn-hint"></p>
         <button class="ghost" id="layout-reset" title="Back to the MPK mini defaults">reset layout</button>
       </div>
       <div id="params"></div>
@@ -439,9 +459,15 @@ function renderParams(s) {
 }
 
 // ── Controller ──────────────────────────────────────────────────────────────
-const ctlKey = (c) => c === "pitch_bend" ? "pb" : "cc" + c.cc;
-const ctlLabel = (c) => c === "pitch_bend" ? "Pitch" : "CC" + c.cc;
-const ctlValue = (s, c) => c === "pitch_bend" ? s.pitch_bend : (s.ccs[c.cc] ?? 0);
+const isPad = (c) => c.pad !== undefined;
+const ctlKey = (c) => c === "pitch_bend" ? "pb" : isPad(c) ? "pad" + c.pad : "cc" + c.cc;
+const ctlLabel = (c) => c === "pitch_bend" ? "Pitch" : isPad(c) ? "Note " + c.pad : "CC" + c.cc;
+const ctlValue = (s, c) => c === "pitch_bend" ? s.pitch_bend : isPad(c) ? (s.pads[c.pad] ?? 0) : (s.ccs[c.cc] ?? 0);
+const PADS_PER_BANK = 8;
+// Pad slots in grid order: the top row is pads 5-8, the bottom row 1-4.
+const PAD_GRID = [4, 5, 6, 7, 0, 1, 2, 3];
+const LEARN_HINT = "Drag a knob up or down to turn it, click a pad to hit it. If a control here doesn't match your MPK, click its label and move or hit the real one.";
+let padBank = 0;
 let ctlEls = [];          // per slot: { control, set(v), root }
 let learnSlot = null;     // slot waiting for the next hardware move
 let learnFrom = 0;        // control_moves when learning started
@@ -536,6 +562,33 @@ function buildWheel(slot, c, label) {
   return { dial: box, set };
 }
 
+function buildPad(padSlot, label) {
+  const pad = el("button", { class: "pad", onclick: () => send({ cmd: "pad", slot: padSlot }) });
+  pad.setAttribute("aria-label", label);
+  const set = (v) => {
+    pad.style.setProperty("--lvl", v);
+    pad.classList.toggle("down", v > 0);
+  };
+  return { dial: pad, set };
+}
+
+// What a pad slot does: bank A plays the sketch's actions, bank B the app's.
+function padAction(s, padSlot) {
+  const bank = Math.floor(padSlot / PADS_PER_BANK);
+  return (bank === 0 ? s.actions : bank === 1 ? s.app_actions : [])[padSlot % PADS_PER_BANK] || null;
+}
+
+function showBank(bank) {
+  padBank = bank;
+  $("bank-a").classList.toggle("active", bank === 0);
+  $("bank-b").classList.toggle("active", bank === 1);
+  $("bank-hint").textContent = bank === 0 ? "this sketch's actions" : "app actions, on every sketch";
+  const first = lastState ? lastState.layout.wheels.length + lastState.layout.knobs.length : 0;
+  ctlEls.slice(first).forEach((e, i) => { e.root.hidden = Math.floor(i / PADS_PER_BANK) !== bank; });
+}
+$("bank-a").onclick = () => showBank(0);
+$("bank-b").onclick = () => showBank(1);
+
 // What a control does in the active sketch: its knob name and scaled value.
 function describe(s, c) {
   if (c === "pitch_bend") {
@@ -549,12 +602,27 @@ function describe(s, c) {
 }
 
 function renderController(s) {
-  const slots = [...s.layout.wheels, ...s.layout.knobs];
-  if (changed("ctl", [s.sketch, s.layout, s.params.map((p) => [p.cc, p.name]), s.presets.length, s.preset])) {
+  const slots = [...s.layout.wheels, ...s.layout.knobs, ...s.layout.pads];
+  const nw = s.layout.wheels.length, nk = s.layout.knobs.length;
+  if (changed("ctl", [s.sketch, s.layout, s.params.map((p) => [p.cc, p.name]), s.presets.length, s.preset, s.actions, s.app_actions])) {
     ctlEls = slots.map((c, i) => {
+      if (i >= nw + nk) {
+        const padSlot = i - nw - nk;
+        const action = padAction(s, padSlot);
+        const bank = padSlot < PADS_PER_BANK ? "A" : "B";
+        const { dial, set } = buildPad(padSlot, `Pad ${bank}${padSlot % PADS_PER_BANK + 1}: ${action || "unused"}`);
+        dial.textContent = action || "–";
+        const tag = el("button", {
+          class: "tag" + (learnSlot === i ? " learning" : ""),
+          textContent: learnSlot === i ? "hit…" : ctlLabel(c),
+          title: "Re-map: click, then hit the matching pad on the MPK",
+          onclick: () => startLearn(learnSlot === i ? null : i),
+        });
+        return { control: c, root: el("div", { class: "ctl" + (action ? "" : " unused") }, dial, tag), set };
+      }
       const d = describe(s, c);
-      const wheel = i < s.layout.wheels.length;
-      const n = wheel ? i + 1 : i - s.layout.wheels.length + 1;
+      const wheel = i < nw;
+      const n = wheel ? i + 1 : i - nw + 1;
       const label = `${wheel ? "Wheel" : "Knob"} ${n}: ${d.name}`;
       const { dial, set } = wheel ? buildWheel(i, c, label) : buildKnob(i, c, label);
       const val = el("div", { class: "val" });
@@ -568,9 +636,11 @@ function renderController(s) {
         el("div", { class: "name", textContent: d.name, title: d.name }), val, tag);
       return { control: c, root, set: (v) => { set(v); val.textContent = d.fmt(v); } };
     });
-    const nw = s.layout.wheels.length;
     $("wheels").replaceChildren(...ctlEls.slice(0, nw).map((e) => e.root));
-    $("knobs").replaceChildren(...ctlEls.slice(nw).map((e) => e.root));
+    $("knobs").replaceChildren(...ctlEls.slice(nw, nw + nk).map((e) => e.root));
+    const pads = ctlEls.slice(nw + nk);
+    $("pads").replaceChildren(...[0, 1].flatMap((b) => PAD_GRID.map((j) => pads[b * PADS_PER_BANK + j]).filter(Boolean).map((e) => e.root)));
+    showBank(padBank);
     const scroll = s.layout.knobs.findIndex((c) => c.cc === s.scroll_cc);
     $("preset-hint").textContent = scroll >= 0 ? `knob ${scroll + 1} scrolls them too` : `CC ${s.scroll_cc} scrolls them too`;
   }
@@ -584,13 +654,20 @@ function renderController(s) {
   lastMoves = s.control_moves;
   if (moved) {
     $("last-moved").textContent = `last moved: ${ctlLabel(s.last_control)}`;
-    const hit = ctlEls.find((e) => ctlKey(e.control) === ctlKey(s.last_control));
+    const hitIdx = ctlEls.findIndex((e) => ctlKey(e.control) === ctlKey(s.last_control));
+    const hit = ctlEls[hitIdx];
+    // A pad hit on the other bank brings that bank into view.
+    if (hit && hitIdx >= nw + nk) {
+      const bank = Math.floor((hitIdx - nw - nk) / PADS_PER_BANK);
+      if (bank !== padBank) showBank(bank);
+    }
     if (hit) {
       hit.root.classList.add("hit");
       clearTimeout(hit.root._hit);
       hit.root._hit = setTimeout(() => hit.root.classList.remove("hit"), 300);
     }
-    if (learnSlot !== null && s.control_moves > learnFrom) {
+    // A pad slot only learns a pad, and a knob or wheel never does.
+    if (learnSlot !== null && s.control_moves > learnFrom && (learnSlot >= nw + nk) === isPad(s.last_control)) {
       send({ cmd: "assign", slot: learnSlot, control: s.last_control });
       startLearn(null);
     }
@@ -602,11 +679,12 @@ function startLearn(slot) {
   learnFrom = lastMoves ?? 0;
   delete shown.ctl; // rebuild so the label shows the state
   $("learn-hint").textContent = slot === null
-    ? "Drag a knob up or down to turn it. If a knob here doesn't match your MPK, click its CC label and move the real one."
-    : "Now move the control that sits in this spot on your MPK… (Esc cancels)";
+    ? LEARN_HINT
+    : "Now move or hit the control that sits in this spot on your MPK… (Esc cancels)";
   if (lastState) renderController(lastState);
 }
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && learnSlot !== null) startLearn(null); });
+$("learn-hint").textContent = LEARN_HINT;
 $("layout-reset").onclick = () => { startLearn(null); send({ cmd: "reset_layout" }); };
 
 const fmt = (v) => Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2);

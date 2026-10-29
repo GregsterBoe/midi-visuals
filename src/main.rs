@@ -21,6 +21,16 @@ enum InputSource {
     Audio,
 }
 
+/// What bank B's pads do, on any sketch: the app's own keys. Bank A plays
+/// the active sketch's `actions()`.
+const APP_ACTIONS: &[(Key, &str)] = &[
+    (Key::Tab, "Next sketch"),
+    (Key::A, "MIDI / audio"),
+    (Key::H, "HUD"),
+    (Key::Return, "Load preset"),
+];
+const PADS_PER_BANK: usize = 8;
+
 enum PresetMode {
     Normal,
     Naming { buf: String, skip: bool },
@@ -66,6 +76,7 @@ struct Model {
     last_midi_t: Instant,
     midi_cc_seen: bool,
     midi_note_seen: bool,
+    midi_pad_seen: bool,
     presets: PresetStore,
     preset_idx: usize,
     preset_mode: PresetMode,
@@ -157,6 +168,7 @@ fn model(app: &App) -> Model {
         last_midi_t: Instant::now(),
         midi_cc_seen: false,
         midi_note_seen: false,
+        midi_pad_seen: false,
         presets,
         preset_idx: 0,
         preset_mode: PresetMode::Normal,
@@ -295,6 +307,7 @@ impl Model {
                     self.active.key_pressed(key);
                 }
             }
+            Command::Pad { slot } => self.hit_pad(slot),
             Command::Input { audio } => self.set_input(if audio { InputSource::Audio } else { InputSource::Midi }),
             Command::Engine { idx } => self.set_engine(idx),
             Command::Gate { db } => self.set_gate(db),
@@ -329,6 +342,48 @@ impl Model {
         }
     }
 
+    /// A pad slot (bank A's 8, then bank B's) was hit, on the MPK or the panel.
+    fn hit_pad(&mut self, slot: usize) {
+        let (bank, i) = (slot / PADS_PER_BANK, slot % PADS_PER_BANK);
+        match bank {
+            0 => {
+                if let Some(&(key, _)) = self.active.actions().get(i) {
+                    self.active.key_pressed(key);
+                }
+            }
+            1 => {
+                if let Some(&(key, _)) = APP_ACTIONS.get(i) {
+                    self.press(key);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The app's keys; anything it doesn't use goes to the sketch.
+    fn press(&mut self, key: Key) {
+        match key {
+            Key::Tab => self.select_sketch(self.sketch_idx + 1),
+            Key::H => self.show_hud = !self.show_hud,
+            Key::W => match &self.panel {
+                Some(p) => p.open_in_browser(),
+                None => log_warn!("The control panel isn't running."),
+            },
+            Key::A => {
+                let next = if self.input == InputSource::Midi { InputSource::Audio } else { InputSource::Midi };
+                self.set_input(next);
+            }
+            Key::E => self.set_engine(self.audio_engine + 1),
+            Key::Minus | Key::Equals => {
+                self.set_gate(self.audio_gate_db + if key == Key::Minus { -3.0 } else { 3.0 });
+                log_info!("Audio gate: {:.0} dB", self.audio_gate_db);
+            }
+            Key::S => self.preset_mode = PresetMode::Naming { buf: String::new(), skip: true },
+            Key::Return => self.load_preset(self.preset_idx),
+            _ => self.active.key_pressed(key),
+        }
+    }
+
     fn publish_status(&self, midi: &MidiState) {
         let Some(panel) = &self.panel else { return };
         let audio = self.audio.as_ref().map(|a| {
@@ -346,12 +401,14 @@ impl Model {
             sketch: self.sketch_idx,
             info: self.active.hud_info(),
             actions: self.active.actions().iter().map(|(_, label)| *label).collect(),
+            app_actions: APP_ACTIONS.iter().map(|(_, label)| *label).collect(),
             params: self.active.params().iter()
                 .map(|p| ParamStatus { cc: p.cc, name: p.name, min: p.min, max: p.max, raw: self.prev_ccs[p.cc as usize] })
                 .collect(),
             layout: self.layout.clone(),
             ccs: self.prev_ccs.to_vec(),
             pitch_bend: midi.pitch_bend,
+            pads: midi.pads.to_vec(),
             last_control: midi.last_control,
             control_moves: midi.control_moves,
             scroll_cc: presets::SCROLL_CC,
@@ -404,26 +461,7 @@ fn key_pressed(_app: &App, model: &mut Model, key: Key) {
         return;
     }
 
-    match key {
-        Key::Tab => model.select_sketch(model.sketch_idx + 1),
-        Key::H => model.show_hud = !model.show_hud,
-        Key::W => match &model.panel {
-            Some(p) => p.open_in_browser(),
-            None => log_warn!("The control panel isn't running."),
-        },
-        Key::A => {
-            let next = if model.input == InputSource::Midi { InputSource::Audio } else { InputSource::Midi };
-            model.set_input(next);
-        }
-        Key::E => model.set_engine(model.audio_engine + 1),
-        Key::Minus | Key::Equals => {
-            model.set_gate(model.audio_gate_db + if key == Key::Minus { -3.0 } else { 3.0 });
-            log_info!("Audio gate: {:.0} dB", model.audio_gate_db);
-        }
-        Key::S => model.preset_mode = PresetMode::Naming { buf: String::new(), skip: true },
-        Key::Return => model.load_preset(model.preset_idx),
-        _ => model.active.key_pressed(key),
-    }
+    model.press(key);
 }
 
 fn update(app: &App, model: &mut Model, update: Update) {
@@ -442,8 +480,23 @@ fn update(app: &App, model: &mut Model, update: Update) {
         let mut s = model.midi_state.lock().unwrap();
         let snap = s.clone();
         s.recent_events.clear();
+        s.pad_hits.clear();
         snap
     };
+
+    // Pads trigger actions in either input mode; they are never notes.
+    if !midi_snapshot.pad_hits.is_empty() {
+        model.last_midi_t = Instant::now();
+        if !model.midi_pad_seen {
+            log_info!("MIDI pads: OK");
+            model.midi_pad_seen = true;
+        }
+    }
+    for &note in &midi_snapshot.pad_hits {
+        if let Some(slot) = model.layout.pads.iter().position(|&c| c == midi::Control::Pad(note)) {
+            model.hit_pad(slot);
+        }
+    }
 
     // In audio mode the detected notes replace MIDI's; knobs stay on MIDI.
     if model.input == InputSource::Audio {

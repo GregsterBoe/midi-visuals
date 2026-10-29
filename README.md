@@ -17,10 +17,10 @@ While the app runs, it serves a control panel at <http://127.0.0.1:7878>. Press 
 window to open it in the browser, or start with `--open`. From the panel you can:
 
 - switch sketches and trigger their actions (reset, colour mode, rain, …)
-- see and turn the knobs and wheels where they sit on the MPK mini, labelled with what they
-  do in the active sketch, so a MIDI controller is optional. If a control on the page doesn't
-  match the hardware, click its CC label and move the real control to re-map it (saved in
-  `presets/controller.json`; "reset layout" restores the defaults)
+- see and turn the knobs and wheels, and hit the pads, where they sit on the MPK mini, labelled
+  with what they do in the active sketch, so a MIDI controller is optional. If a control on the
+  page doesn't match the hardware, click its label and move or hit the real control to re-map
+  it (saved in `presets/controller.json`; "reset layout" restores the defaults)
 - load, save and delete presets
 - switch notes between MIDI and audio, pick the audio source and pitch engine, and set the
   noise gate on a live level meter
@@ -41,6 +41,18 @@ free one is used (the window's HUD shows which). `--no-panel` turns it off.
 | `E`   | Cycle the audio pitch engine    |
 | `-` / `=` | Audio noise gate down / up 3 dB |
 | `W`   | Open the control panel in the browser |
+
+## Pads
+
+The MPK's pads trigger one-off actions instead of playing notes, in MIDI and audio mode
+alike. Anything on MIDI channel 10 (the pads' default) counts as a pad; the keys stay notes.
+
+| Bank | Pads 1–8 |
+|------|----------|
+| A (notes 36–43) | The active sketch's actions, in the order of its panel buttons (e.g. droplets: Flow, Surge, Tune, Clear; rings: Rain, Gravity, Push / pull, Clear) |
+| B (notes 44–51) | Next sketch, MIDI / audio, HUD, Load preset |
+
+Pad 1 is bottom left, pad 5 top left. The panel shows each pad's action and lights it while held.
 
 The HUD (top-left) shows the active sketch name, current FPS, and a green dot that flashes on any note or knob input.
 Presets are saved per-sketch in `presets/<sketch_name>.txt`. CC 31 scrolls through saved presets.
