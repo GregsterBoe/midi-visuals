@@ -6,9 +6,14 @@
 //! the file's real note starts gives each engine's end-to-end latency.
 //!
 //! `--listen [engine]` prints live detections from the audio input.
+//!
+//! `--beats file.wav [gate_db]` runs the beat tracker and the default
+//! engine over a file at 60 frames a second, as the app would, and prints
+//! each beat with its hits, and each chord change.
 
 use std::time::{Duration, Instant};
 
+use super::onset::OnsetDetector;
 use super::resample::{DcBlocker, Resampler};
 use super::tracker::Tracker;
 use super::{build_engine, engine_index, AudioInput, DEFAULT_GATE_DB, ENGINES};
@@ -58,6 +63,61 @@ pub fn run(args: &[String]) -> Result<(), String> {
             }
         }
         eprintln!("{}: {:.1}x real time", engine.name(), secs / busy.max(1e-6));
+    }
+    Ok(())
+}
+
+pub fn beats(args: &[String]) -> Result<(), String> {
+    let path = args.first().ok_or("usage: --beats <file.wav> [gate_db]")?;
+    let gate = args.get(1).and_then(|g| g.parse().ok()).unwrap_or(DEFAULT_GATE_DB);
+    let (audio, rate) = read_wav(path)?;
+    let mut dc = DcBlocker::new(rate);
+    let mut onset = OnsetDetector::new(rate);
+    let mut analyzer = crate::music::Analyzer::new();
+    let mut engine = build_engine(0)?;
+    let mut resampler = Resampler::new(rate, engine.sample_rate());
+    let mut tracker = Tracker::new(engine.tracker());
+    let mut notes = [crate::midi::NoteState::default(); 128];
+    let mut events = std::collections::VecDeque::new();
+    let (mut block, mut onsets, mut buf, mut frames, mut evs) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut chords = 0;
+    let frame = (rate / 60) as usize;
+    let (mut count, mut first, mut last) = (0, None, 0.0);
+    for (i, c) in audio.chunks(frame).enumerate() {
+        block.clear();
+        block.extend_from_slice(c);
+        dc.process(&mut block);
+        onsets.clear();
+        onset.push(&block, &mut onsets);
+        buf.clear();
+        resampler.process(&block, &mut buf);
+        engine.push(&buf, &mut frames);
+        for f in frames.drain(..) {
+            tracker.step(&f, gate, &mut evs);
+        }
+        events.clear();
+        for (n, v, on) in evs.drain(..) {
+            notes[n as usize] = crate::midi::NoteState { velocity: v, on };
+            events.push_back(crate::midi::NoteEvent { note: n, velocity: v, on });
+        }
+        let loud = ((super::level_db(&block) - gate) / 30.0).clamp(0.0, 1.0);
+        let m = analyzer.step(crate::music::Source::Audio, &events, &notes, &onsets, Some(loud), 1.0 / 60.0);
+        let t = (i + 1) as f32 / 60.0;
+        if m.chord_changed {
+            chords += 1;
+            let held: Vec<String> = (0..128u8).filter(|&n| m.held[n as usize].on).map(|n| NAMES[n as usize % 12].to_string()).collect();
+            println!("{t:7.3}  chord [{}]", held.join(" "));
+        }
+        if m.on_beat() {
+            let hits: Vec<String> = m.hits.iter().map(|h| note_name(h.note)).collect();
+            println!("{t:7.3}  {:.2}  {:5.1} bpm  {:+.3}  {}", m.beat, m.bpm, t - last, hits.join(" "));
+            count += 1;
+            first.get_or_insert(t);
+            last = t;
+        }
+    }
+    if let Some(f) = first {
+        eprintln!("{count} beats, mean gap {:.3} s, {chords} chord changes", (last - f) / (count - 1).max(1) as f32);
     }
     Ok(())
 }

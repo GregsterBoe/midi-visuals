@@ -1,5 +1,5 @@
 use crate::midi::MidiState;
-use crate::sketches::{flag_suffix, Param, Sketch, Stream, StreamParams};
+use crate::sketches::{flag_suffix, Param, Sketch, Smoothed, Stream, StreamParams};
 use nannou::prelude::*;
 use nannou::rand::{thread_rng, Rng};
 use std::cell::{Cell, RefCell};
@@ -27,7 +27,8 @@ const INFLUENCE_RENDER_GAIN: f32 = 0.25; // intensity → alpha
 const INFLUENCE_RENDER_MAX: f32 = 95.0 / 255.0;
 
 // Trail geometry is rebuilt every N frames. Drop geometry rebuilds every frame.
-const TRAIL_REBUILD_INTERVAL: u8 = 3;
+// Every frame: rebuilding less often makes the trail step visibly.
+const TRAIL_REBUILD_INTERVAL: u8 = 1;
 
 // ── instanced rendering ───────────────────────────────────────────────────────
 // Each instance is 10 f32s: center(2) + axes(4) + color(4).
@@ -104,6 +105,8 @@ const P_FLOW_WIDTH: usize = 6;
 
 // ── layer ─────────────────────────────────────────────────────────────────────
 const SURGE_COUNT: usize = 60;      // droplets in one surge, spread over the flow band
+const HIT_DROPLETS: (f32, f32) = (5.0, 14.0); // droplets per hit, soft → hard
+const CLEAR_SECS: f32 = 0.5;        // Clear fades everything out over this long
 
 // ── color ─────────────────────────────────────────────────────────────────────
 const LAYER_HUE_OFFSET: f32 = 180.0; // the layer is drawn in the opposite hue
@@ -123,6 +126,8 @@ struct Droplet {
     alpha: f32,
     color: [f32; 3],
     stream: Stream,
+    /// This droplet's share of the base speed, fixed so it glides evenly.
+    speed: f32,
     alive: bool,
 }
 
@@ -137,7 +142,11 @@ pub struct Droplets {
     tunes: StreamParams,
     /// The layer's continuous flow, toggled by hand.
     flow: bool,
+    /// Ramps the flow up and down instead of switching it.
+    s_flow: Smoothed,
     surge: bool,
+    /// Counts down from 1 while a Clear fades the field out.
+    clearing: f32,
     spawn_accum: f32,
     win: Cell<Rect>,
     deposits: Vec<(Vec2, f32, [f32; 3], Stream)>,
@@ -164,7 +173,9 @@ impl Droplets {
             rows,
             tunes: StreamParams::new(PARAMS.len()),
             flow: false,
+            s_flow: Smoothed::new(0.0, 2.5),
             surge: false,
+            clearing: 0.0,
             spawn_accum: 0.0,
             win: Cell::new(Rect::from_w_h(win_w, win_h)),
             deposits: Vec::new(),
@@ -385,6 +396,7 @@ impl Droplets {
             alpha: alpha.clamp(40.0 / 255.0, 1.0),
             color,
             stream,
+            speed: 1.0 + rng.gen_range(-SPEED_VARIATION..SPEED_VARIATION),
             alive: true,
         });
     }
@@ -422,11 +434,13 @@ impl Droplets {
     fn build_drop_instances(&mut self) {
         let win = self.win.get();
         self.drop_instances.clear();
+        let clear_fade = 1.0 - self.clearing;
         for d in &self.droplets {
             // Fade out only in the last 15% of the screen so droplets are bright the whole crossing.
             let progress = ((d.pos.x - win.left()) / win.w()).clamp(0.0, 1.0);
             let [r, g, b] = d.color;
-            let a = d.alpha * (progress / 0.15).min(1.0);
+            let edge = (progress / 0.15).min(1.0);
+            let a = d.alpha * edge * edge * (3.0 - 2.0 * edge) * clear_fade;
 
             // Tail: oriented quad spanning prev_pos → pos
             let dir = d.pos - d.prev_pos;
@@ -477,8 +491,20 @@ impl Sketch for Droplets {
             self.trail_frame = 0;
         }
 
-        let decay = (1.0 - decay_rate * dt).max(0.0);
+        // A Clear fades the trail fast, then drops what's left.
+        let clear_rate = if self.clearing > 0.0 { 8.0 } else { 0.0 };
+        let decay = (1.0 - (decay_rate + clear_rate) * dt).max(0.0);
         for v in &mut self.influence { *v *= decay; }
+        if self.clearing > 0.0 {
+            self.clearing -= dt / CLEAR_SECS;
+            if self.clearing <= 0.0 {
+                self.clearing = 0.0;
+                self.droplets.clear();
+                self.influence.fill(0.0);
+                self.trail_rgb.fill([0.0; 3]);
+                self.trail_layer.fill(0.0);
+            }
+        }
 
         let mut deposits = std::mem::take(&mut self.deposits);
         deposits.clear();
@@ -510,9 +536,7 @@ impl Sketch for Droplets {
                 let jitter = rng.gen_range(-1.0f32..1.0) * jitter_range;
                 d.vel_y += (target_vy + jitter - d.vel_y) * 0.12;
 
-                let speed = (base_speed
-                    * (1.0 + rng.gen_range(-SPEED_VARIATION..SPEED_VARIATION)))
-                    .max(10.0);
+                let speed = (base_speed * d.speed).max(10.0);
                 d.pos.x -= speed * dt;
                 d.pos.y = (d.pos.y + d.vel_y * dt)
                     .clamp(win.bottom() + CLAMP_PAD, win.top() - CLAMP_PAD);
@@ -532,13 +556,14 @@ impl Sketch for Droplets {
 
         self.droplets.retain(|d| d.alive);
 
-        // Auto stream — note-on burst: high notes → top, low notes → bottom.
-        // Velocity scales radius and alpha; all droplets cross the full screen.
-        for event in midi.note_on_events() {
+        // Auto stream — a burst per hit: high notes → top, low notes → bottom.
+        // Velocity scales the count, radius and alpha; all droplets cross the full screen.
+        for event in &midi.music.hits {
             if self.droplets.len() >= MAX_DROPLETS { break; }
             let note_y = win.bottom() + (event.note as f32 / 127.0) * win.h();
             let velocity = event.velocity;
-            for _ in 0..rng.gen_range(4..=8_usize) {
+            let count = HIT_DROPLETS.0 + (HIT_DROPLETS.1 - HIT_DROPLETS.0) * velocity;
+            for _ in 0..count.round() as usize {
                 let y = note_y + rng.gen_range(-20.0f32..20.0f32);
                 let radius = DROPLET_RADIUS * (0.7 + 0.6 * velocity);
                 let alpha = DROPLET_ALPHA * (0.5 + 0.5 * velocity);
@@ -547,8 +572,9 @@ impl Sketch for Droplets {
         }
 
         // Layer: the continuous flow while it's on, plus a surge when asked for.
-        if self.flow {
-            self.spawn_accum += flow_rate * dt;
+        let flow_mix = self.s_flow.drive(if self.flow { 1.0 } else { 0.0 }, dt);
+        if flow_mix > 0.01 {
+            self.spawn_accum += flow_rate * flow_mix * dt;
             while self.spawn_accum >= 1.0 && self.droplets.len() < MAX_DROPLETS {
                 self.spawn_accum -= 1.0;
                 self.spawn_flow(&mut rng, band);
@@ -655,15 +681,10 @@ impl Sketch for Droplets {
 
     fn key_pressed(&mut self, key: Key) {
         match key {
-            Key::G => { self.flow = !self.flow; self.spawn_accum = 0.0; }
+            Key::G => self.flow = !self.flow,
             Key::B => self.surge = true,
             Key::T => self.tunes.target = self.tunes.target.next(),
-            Key::R => {
-                self.droplets.clear();
-                self.influence.fill(0.0);
-                self.trail_rgb.fill([0.0; 3]);
-                self.trail_layer.fill(0.0);
-            }
+            Key::R => self.clearing = 1.0,
             _ => {}
         }
     }

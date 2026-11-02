@@ -58,6 +58,45 @@ impl Smoothed {
     /// Teleport to `value` with no smoothing lag.
     #[allow(dead_code)]
     pub fn snap(&mut self, value: f32) { self.value = value; }
+
+    /// `drive` for a hue in turns: takes the short way round the colour
+    /// wheel. The value may leave [0, 1); wrap it where it's used.
+    pub fn drive_hue(&mut self, target: f32, dt: f32) -> f32 {
+        let d = (target - self.value + 0.5).rem_euclid(1.0) - 0.5;
+        self.drive(self.value + d, dt)
+    }
+}
+
+/// For one-off events (beats, surges, flashes): `trigger` raises a target
+/// that dies away at `release`, and the value chases it at `attack`. So the
+/// value rises fast but never jumps, and always fades out smoothly.
+pub struct Envelope {
+    pub value: f32,
+    target: f32,
+    attack: f32,
+    release: f32,
+}
+
+impl Envelope {
+    pub const fn new(attack: f32, release: f32) -> Self {
+        Self { value: 0.0, target: 0.0, attack, release }
+    }
+
+    pub fn trigger(&mut self, level: f32) {
+        self.target = self.target.max(level);
+    }
+
+    pub fn step(&mut self, dt: f32) -> f32 {
+        self.target *= (-self.release * dt).exp();
+        self.value += (self.target - self.value) * (1.0 - (-self.attack * dt).exp());
+        self.value
+    }
+}
+
+/// 0 → 1 with zero slope at both ends; `t` is clamped to [0, 1].
+pub fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// The two streams of a layered sketch: `Auto` is drawn from the notes

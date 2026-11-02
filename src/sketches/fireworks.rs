@@ -1,5 +1,5 @@
 use crate::midi::{MidiState, NoteState};
-use crate::sketches::{flag_suffix, zodiac_points, Param, Sketch, Stream, StreamParams, LAYER_HUE_SHIFT};
+use crate::sketches::{flag_suffix, smoothstep, zodiac_points, Param, Sketch, Smoothed, Stream, StreamParams, LAYER_HUE_SHIFT};
 use nannou::prelude::*;
 use nannou::rand::{thread_rng, Rng};
 use std::cell::Cell;
@@ -25,6 +25,10 @@ const P_HUE_SPREAD: usize = 5;
 const P_BARRAGE_RATE: usize = 6;
 
 const VOLLEY_SHELLS: usize = 5;   // shells in one volley, spread across the width
+/// An auto shell bursts on the first beat after it has risen this long.
+const BEAT_BURST_AGE: f32 = 0.45;
+const SWAY_PX: f32 = 40.0;        // how far tension sways rising shells
+const CLEAR_SECS: f32 = 0.4;
 
 const MAX_SHELLS: usize = 32;
 const MAX_PARTICLES: usize = 12_000;
@@ -241,6 +245,7 @@ struct Shell {
     age: f32,
     form: BurstForm,
     stream: Stream,
+    sway_phase: f32,
 }
 
 struct Particle {
@@ -263,6 +268,9 @@ pub struct Fireworks {
     win: Cell<Rect>,
     mesh_verts: Vec<(Vec3, LinSrgba)>,
     mesh_idx: Vec<usize>,
+    /// Counts down from 1 while a Clear fades everything out.
+    clearing: f32,
+    s_tension: Smoothed,
     form_index: usize,           // cycles BurstForm for single-note bursts
     prev_chord: ChordQuality,    // previous frame — used for V7→I detection
     current_chord: ChordQuality, // for HUD
@@ -282,6 +290,8 @@ impl Fireworks {
             win: Cell::new(Rect::from_w_h(800.0, 600.0)),
             mesh_verts: Vec::with_capacity((MAX_PARTICLES + MAX_SHELLS) * 4),
             mesh_idx: Vec::with_capacity((MAX_PARTICLES + MAX_SHELLS) * 6),
+            clearing: 0.0,
+            s_tension: Smoothed::new(0.0, 2.0),
             form_index: 0,
             prev_chord: ChordQuality::Other,
             current_chord: ChordQuality::Other,
@@ -311,6 +321,7 @@ impl Fireworks {
             age: 0.0,
             form,
             stream,
+            sway_phase: rng.gen_range(0.0f32..TAU),
         });
     }
 
@@ -343,13 +354,14 @@ impl Fireworks {
     fn build_mesh(&mut self) {
         self.mesh_verts.clear();
         self.mesh_idx.clear();
+        let fade = 1.0 - self.clearing;
         for p in &self.particles {
             let t = p.lifetime / p.max_lifetime;
-            let color = hsl_to_lin(p.hue, 0.7 + t * 0.25, 0.4 + t * 0.35, t);
-            push_quad(&mut self.mesh_verts, &mut self.mesh_idx, p.pos, PARTICLE_R, color);
+            let color = hsl_to_lin(p.hue, 0.7 + t * 0.25, 0.4 + t * 0.35, smoothstep(t * 1.4) * fade);
+            push_quad(&mut self.mesh_verts, &mut self.mesh_idx, p.pos, PARTICLE_R * (0.6 + 0.4 * t), color);
         }
         for shell in &self.shells {
-            let color = hsl_to_lin(shell.hue, 0.4, 0.95, 1.0);
+            let color = hsl_to_lin(shell.hue, 0.4, 0.95, smoothstep(shell.age / 0.15) * fade);
             push_quad(&mut self.mesh_verts, &mut self.mesh_idx, shell.pos, SHELL_R, color);
         }
     }
@@ -384,17 +396,28 @@ impl Sketch for Fireworks {
         let height_cap = win.h() * 0.35;
         let mut rng = thread_rng();
 
-        // Music theory — derived from held notes this frame
-        let chord = detect_chord(&midi.notes);
-        let tension = tension_from_notes(&midi.notes);
+        if self.clearing > 0.0 {
+            self.clearing -= dt / CLEAR_SECS;
+            if self.clearing <= 0.0 {
+                self.clearing = 0.0;
+                self.shells.clear();
+                self.particles.clear();
+            }
+        }
+
+        // Music theory — from the steady chord, which only changes on a beat
+        let music = &midi.music;
+        let chord = detect_chord(&music.held);
+        let tension = self.s_tension.drive(tension_from_notes(&music.held), dt);
         // V7→I: dom7 resolving to major or minor triggers a grand finale
-        let trigger_finale = self.prev_chord == ChordQuality::Dom7th
+        let trigger_finale = music.chord_changed
+            && self.prev_chord == ChordQuality::Dom7th
             && (chord == ChordQuality::Major || chord == ChordQuality::Minor);
         self.current_chord = chord;
         self.current_tension = tension;
 
-        // Auto stream: a shell for each note-on event, pitch → x
-        for ev in midi.note_on_events() {
+        // Auto stream: a shell for each hit, pitch → x
+        for ev in &music.hits {
             let x = (ev.note as f32 / 127.0 - 0.5) * win.w() * 0.88;
             let hue_offset = if hue_spread > 0.0 {
                 rng.gen_range(-hue_spread..hue_spread)
@@ -425,16 +448,15 @@ impl Sketch for Fireworks {
             }
         }
 
-        // Advance shells; dissonant held notes jitter rising trajectories
+        // Advance shells; dissonance sways rising trajectories
+        let sway = (tension - 0.3).max(0.0) * SWAY_PX;
         for shell in &mut self.shells {
             let gravity = self.tunes.get(shell.stream, P_GRAVITY);
             shell.vel.y -= gravity * SHELL_GRAV_SCALE * dt;
             shell.pos += shell.vel * dt;
+            shell.pos.x += sway * (shell.age * 4.0 + shell.sway_phase).cos() * 4.0 * dt;
             shell.fuse -= dt;
             shell.age += dt;
-            if tension > 0.3 {
-                shell.pos.x += rng.gen_range(-1.0f32..1.0) * tension * 15.0 * dt;
-            }
         }
 
         if trigger_finale {
@@ -455,6 +477,7 @@ impl Sketch for Fireworks {
                 age: 100.0,
                 form: BurstForm::Ring,
                 stream: Stream::Auto,
+                sway_phase: 0.0,
             };
             self.burst(&mega, self.tunes.get(Stream::Auto, P_LIFETIME) * 1.5, &mut rng);
         } else {
@@ -464,7 +487,9 @@ impl Sketch for Fireworks {
                 let at_apex  = shell.vel.y <= 0.0 && shell.age > 0.15;
                 let too_high = shell.pos.y > height_cap;
                 let fuse_out = shell.fuse <= 0.0;
-                if at_apex || too_high || fuse_out {
+                // The auto stream's shells burst on the beat.
+                let on_beat  = shell.stream == Stream::Auto && music.on_beat() && shell.age >= BEAT_BURST_AGE;
+                if at_apex || too_high || fuse_out || on_beat {
                     bursting.push(shell);
                 } else {
                     alive.push(shell);
@@ -476,7 +501,7 @@ impl Sketch for Fireworks {
             }
         }
 
-        self.prev_chord = chord;
+        if music.chord_changed { self.prev_chord = chord; }
 
         for p in &mut self.particles {
             p.vel.y -= self.tunes.get(p.stream, P_GRAVITY) * dt;
@@ -534,7 +559,7 @@ impl Sketch for Fireworks {
             Key::G => { self.barrage = !self.barrage; self.barrage_accum = 0.0; }
             Key::B => self.volley = true,
             Key::T => self.tunes.target = self.tunes.target.next(),
-            Key::R => { self.shells.clear(); self.particles.clear(); }
+            Key::R => self.clearing = 1.0,
             _ => {}
         }
     }

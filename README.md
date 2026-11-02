@@ -75,6 +75,37 @@ drift apart. The HUD shows `tune auto` or `tune layer` while only one is tuned.
 | mandala | a halo of petals round the mandala, turning against it | Surge: stretches the halo and sends a pulse out | — |
 | rings | rain from a turning point round the centre | Halo: twelve rings round the centre at once | rain rate, spread (layer only) |
 
+## Reacting to music
+
+The sketches don't answer every note. A pitch engine on a full mix reports ten or more notes a
+second, and answering all of them makes the visuals twitch. Instead, every sketch reacts to a few
+features worked out from the notes (`src/music.rs`):
+
+- **Beats.** From audio, a tempo tracker follows the beat in the sound itself (a spectral-flux
+  onset envelope, 60–150 BPM; faster music is followed at half time). Once it has locked on, beats
+  keep time and off-beat noise is skipped. In music without a steady pulse, beats fall on the
+  most prominent onsets, at most two a second. From MIDI, every chord you play is a beat.
+- **Hits.** The notes a sketch answers with a ring, shell, burst or kick. From audio there are only
+  one or two per beat: the strongest notes that started since the last beat. From MIDI, every
+  note you play is a hit.
+- **Pulse.** Swells quickly but smoothly on each beat and dies away over about half a second. It
+  drives continuous effects such as zoom, warp, brightness and dot size.
+- **Energy.** How loud (audio) or busy (MIDI) the music is, following over a second or two.
+- **Chord.** A steady chord. From audio, it changes only on a beat, once a new chord has settled
+  and the last one has lasted at least 1.6 s. Chord-driven changes, such as the mandala's form or
+  the kaleidoscope's symmetry, therefore come at most every couple of seconds and land on the beat.
+
+Everything else is eased: knobs glide (a loaded preset glides over about a second), switching
+sketches fades through black, and Clear, Reset, pattern and colour-mode changes cross-fade
+instead of cutting.
+
+The HUD shows the tempo once the tracker is locked (`beat` before that), with a bar that swells on
+each beat; the panel shows the tempo next to the FPS. To check the tracker on a recording:
+
+```
+cargo run --release -- --beats take.wav -34     # beats, hits and chord changes; the number is the gate in dB
+```
+
 The HUD (top-left) shows the active sketch name, current FPS, and a green dot that flashes on any note or knob input.
 Presets are saved per-sketch in `presets/<sketch_name>.txt`. CC 31 scrolls through saved presets.
 
@@ -161,7 +192,9 @@ Multiple independent collections can be layered with angular alignment control.
 | CC 29        | Alignment   | 0 – 1 (spread between collections) |
 | CC 30        | Trail length| 1 – 500 frames             |
 
-Note-on events send a radial spring impulse — circles deflect outward then snap back.
+Each hit sends a radial spring impulse — circles deflect outward then snap back — and each beat
+briefly brightens and swells the dots. Changing the circle count or the collections glides: new
+circles split off and spread out, removed ones fade.
 
 Key bindings:
 
@@ -180,7 +213,7 @@ HUD shows `NxM circles` (collections × circles per collection), the chord and t
 ### droplets
 Simulated rain droplets follow each other's trails, leaving a glowing field. Droplets come in two streams:
 
-- **Auto**: every note played (MIDI or audio) sends a cluster of droplets in at the note's height. High notes enter at the top, low notes at the bottom.
+- **Auto**: every hit (see [Reacting to music](#reacting-to-music)) sends a cluster of droplets in at the note's height, more for a stronger hit. High notes enter at the top, low notes at the bottom.
 - **Layer**: a stream you control yourself, drawn in the opposite hue. You turn the flow on and off, set where and how wide it enters, and fire one-off surges.
 
 The knobs tune both streams by default. With `T` they tune only the auto stream or only the layer. The other stream keeps its values, so the two can drift apart.
@@ -207,7 +240,7 @@ HUD shows the droplet count, trail coverage, and `[flow+tune auto]`-style flags.
 ---
 
 ### fireworks
-Note-on events launch glowing shells upward, positioned by note pitch. Each shell bursts into a radial spray of colored particles at its apex. Note velocity scales the explosion size.
+Each hit launches a glowing shell upward, positioned by note pitch. A shell bursts into a radial spray of colored particles on the first beat after it has risen for a moment, so the bursts land on the music (layer shells burst at their apex). Hit strength scales the explosion size.
 
 | CC | Parameter   | Range       |
 |----|-------------|-------------|
@@ -233,7 +266,7 @@ HUD shows live shell and particle counts.
 ---
 
 ### rings
-Note-on events spawn expanding rings positioned by note pitch. Optional gravity and rain mode.
+Each hit spawns an expanding ring positioned by note pitch; rings slow as they grow and fade out. Optional gravity and rain mode.
 
 | CC | Parameter  | Range        |
 |----|------------|--------------|

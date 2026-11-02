@@ -2,6 +2,7 @@
 mod web;
 mod audio;
 mod midi;
+mod music;
 mod presets;
 mod sketches;
 
@@ -41,6 +42,7 @@ fn main() {
     let tool = match args.get(1).map(String::as_str) {
         Some("--probe") => Some(audio::probe::run as fn(&[String]) -> Result<(), String>),
         Some("--listen") => Some(audio::probe::listen as fn(&[String]) -> Result<(), String>),
+        Some("--beats") => Some(audio::probe::beats as fn(&[String]) -> Result<(), String>),
         _ => None,
     };
     if let Some(tool) = tool {
@@ -99,7 +101,29 @@ struct Model {
     /// Where each control sits on the controller, for the panel's drawing.
     layout: ControllerLayout,
     fps: f32,
+    music: music::Analyzer,
+    /// The last frame's beat pulse and tempo, for the HUD.
+    music_hud: (f32, f32),
+    beats: u64,
+    /// Knob values as the sketches see them. They glide toward the real
+    /// ones, so neither a knob's 7-bit steps nor a preset load jumps.
+    glide_ccs: [f32; 128],
+    glide_bend: f32,
+    /// How fast they glide; slowed for a moment after a preset load.
+    glide_rate: f32,
+    /// Black over the sketch while switching sketches: 0 clear, 1 black.
+    fade: f32,
+    pending_sketch: Option<usize>,
 }
+
+/// Knobs glide at this rate (1/s): 63% of the way in 70 ms.
+const GLIDE_RATE: f32 = 14.0;
+/// After a preset load: 63% in 0.4 s, back to `GLIDE_RATE` over ~2 s.
+const PRESET_GLIDE_RATE: f32 = 2.5;
+const GLIDE_RECOVER: f32 = 6.0;
+/// A sketch switch fades out to black, then the new sketch fades in.
+const FADE_OUT_SECS: f32 = 0.35;
+const FADE_IN_SECS: f32 = 0.6;
 
 fn model(app: &App) -> Model {
     app.new_window()
@@ -186,6 +210,14 @@ fn model(app: &App) -> Model {
         panel,
         layout: ControllerLayout::load(),
         fps: 0.0,
+        music: music::Analyzer::new(),
+        music_hud: (0.0, 0.0),
+        beats: 0,
+        glide_ccs: [0.0; 128],
+        glide_bend: 0.5,
+        glide_rate: GLIDE_RATE,
+        fade: 1.0,
+        pending_sketch: None,
     };
     if args.iter().any(|a| a == "--audio") {
         model.set_input(InputSource::Audio);
@@ -265,8 +297,13 @@ impl Model {
         }
     }
 
+    /// Starts a switch to sketch `idx`: the current one fades out first.
     fn select_sketch(&mut self, idx: usize) {
-        self.sketch_idx = idx % self.registry.len();
+        self.pending_sketch = Some(idx % self.registry.len());
+    }
+
+    fn switch_sketch_now(&mut self, idx: usize) {
+        self.sketch_idx = idx;
         self.active = self.registry[self.sketch_idx].1();
         print_sketch_info(&*self.active);
         self.presets = PresetStore::load(self.active.name());
@@ -285,6 +322,7 @@ impl Model {
             log_info!("Preset loaded: {}", p.name);
             self.preset_idx = idx;
             self.set_ccs(ccs);
+            self.glide_rate = PRESET_GLIDE_RATE;
         }
     }
 
@@ -363,7 +401,7 @@ impl Model {
     /// The app's keys; anything it doesn't use goes to the sketch.
     fn press(&mut self, key: Key) {
         match key {
-            Key::Tab => self.select_sketch(self.sketch_idx + 1),
+            Key::Tab => self.select_sketch(self.pending_sketch.unwrap_or(self.sketch_idx) + 1),
             Key::H => self.show_hud = !self.show_hud,
             Key::W => match &self.panel {
                 Some(p) => p.open_in_browser(),
@@ -416,6 +454,8 @@ impl Model {
             preset: self.preset_idx,
             hud: self.show_hud,
             fps: self.fps,
+            bpm: self.music_hud.1,
+            beats: self.beats,
             audio_on: self.input == InputSource::Audio,
             midi_port: self.midi_port.clone(),
             midi_active: self.last_midi_t.elapsed() < Duration::from_millis(500),
@@ -499,11 +539,15 @@ fn update(app: &App, model: &mut Model, update: Update) {
     }
 
     // In audio mode the detected notes replace MIDI's; knobs stay on MIDI.
+    let mut onsets = Vec::new();
+    let mut loudness = None;
     if model.input == InputSource::Audio {
         if let Some(a) = &model.audio {
             let mut s = a.state.lock().unwrap();
             midi_snapshot.notes = s.notes;
             midi_snapshot.recent_events = std::mem::take(&mut s.recent_events);
+            onsets.extend(s.onsets.drain(..));
+            loudness = Some(((s.level_db - a.gate_db()) / 30.0).clamp(0.0, 1.0));
         }
     }
     // On a source switch, release notes the old source still held so
@@ -557,8 +601,47 @@ fn update(app: &App, model: &mut Model, update: Update) {
         }
     }
 
-    model.active.update(&midi_snapshot, dt);
+    // Sketch switches fade through black.
+    match model.pending_sketch {
+        Some(idx) => {
+            model.fade = (model.fade + dt / FADE_OUT_SECS).min(1.0);
+            if model.fade >= 1.0 {
+                model.pending_sketch = None;
+                model.switch_sketch_now(idx);
+            }
+        }
+        None => model.fade = (model.fade - dt / FADE_IN_SECS).max(0.0),
+    }
+
+    let source = if model.input == InputSource::Audio { music::Source::Audio } else { music::Source::Midi };
+    midi_snapshot.music = model.music.step(
+        source,
+        &midi_snapshot.recent_events,
+        &midi_snapshot.notes,
+        &onsets,
+        loudness,
+        dt,
+    );
+    model.music_hud = (midi_snapshot.music.pulse, midi_snapshot.music.bpm);
+    model.beats += midi_snapshot.music.on_beat() as u64;
+
+    // The panel and HUD show the knobs as set; the sketch sees them glide.
     model.publish_status(&midi_snapshot);
+    let k = 1.0 - (-model.glide_rate * dt).exp();
+    model.glide_rate = (model.glide_rate + GLIDE_RECOVER * dt).min(GLIDE_RATE);
+    for (g, &raw) in model.glide_ccs.iter_mut().zip(&midi_snapshot.ccs) {
+        *g = glide(*g, raw, k);
+    }
+    model.glide_bend = glide(model.glide_bend, midi_snapshot.pitch_bend, k);
+    midi_snapshot.ccs = model.glide_ccs;
+    midi_snapshot.pitch_bend = model.glide_bend;
+    model.active.update(&midi_snapshot, dt);
+}
+
+/// One glide step from `value` toward `target`; lands exactly once close.
+fn glide(value: f32, target: f32, k: f32) -> f32 {
+    let next = value + (target - value) * k;
+    if (target - next).abs() < 1e-4 { target } else { next }
 }
 
 /// HUD lines describing the note source: [A] toggles, [E] cycles engines, [-]/[=] gate.
@@ -584,6 +667,11 @@ fn input_hud(model: &Model) -> Vec<(String, Srgb<u8>)> {
             lines.push((format!("MIDI in{err}"), if err.is_empty() { DIMGRAY } else { RED }));
         }
     }
+    // A bar that swells on each beat, and the tempo once it's locked.
+    let (pulse, bpm) = model.music_hud;
+    let bar = "|".repeat((pulse * 12.0).round() as usize);
+    let tempo = if bpm > 0.0 { format!("{bpm:.0} bpm") } else { "beat".to_string() };
+    lines.push((format!("{tempo} {bar}"), if pulse > 0.5 { WHITE } else { DIMGRAY }));
     lines
 }
 
@@ -593,6 +681,22 @@ fn view(app: &App, model: &Model, frame: Frame) {
 
     draw.background().color(BLACK);
     model.active.view(&draw, win);
+    draw.to_frame(app, &frame).unwrap();
+
+    // Sketches that implement raw_render() draw here via their own wgpu pipeline.
+    {
+        let dqp = frame.device_queue_pair();
+        let mut encoder = frame.command_encoder();
+        let target = frame.texture_view();
+        model.active.raw_render(dqp.device(), dqp.queue(), &mut *encoder, &**target, win);
+    }
+
+    // The switch fade and the HUD go over everything the sketch drew.
+    let draw = Draw::new();
+    if model.fade > 0.0 {
+        let f = model.fade;
+        draw.rect().wh(win.wh()).color(srgba(0.0, 0.0, 0.0, f * f * (3.0 - 2.0 * f)));
+    }
 
     if model.show_hud {
         let fps = app.fps();
@@ -685,10 +789,4 @@ fn view(app: &App, model: &Model, frame: Frame) {
     }
 
     draw.to_frame(app, &frame).unwrap();
-
-    // Sketches that implement raw_render() draw here via their own wgpu pipeline.
-    let dqp = frame.device_queue_pair();
-    let mut encoder = frame.command_encoder();
-    let target = frame.texture_view();
-    model.active.raw_render(dqp.device(), dqp.queue(), &mut *encoder, &**target, win);
 }

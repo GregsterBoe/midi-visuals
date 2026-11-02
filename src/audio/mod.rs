@@ -7,6 +7,7 @@
 
 mod basic_pitch;
 mod dsp_poly;
+pub mod onset;
 pub mod probe;
 pub mod pulse;
 mod resample;
@@ -23,11 +24,14 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 
 use crate::midi::{push_event, NoteEvent, NoteState};
+use onset::OnsetDetector;
 use resample::{DcBlocker, Resampler};
 use tracker::Tracker;
 
 pub const ENGINES: [&str; 3] = ["basic-pitch", "swift-f0", "dsp-poly"];
 pub const DEFAULT_GATE_DB: f32 = -50.0;
+/// Onset values kept when nobody reads them (2 s).
+const MAX_ONSETS: usize = 200;
 
 /// One analysis frame from an engine.
 pub struct Frame {
@@ -70,6 +74,8 @@ pub fn engine_index(name: &str) -> Option<usize> {
 pub struct AudioState {
     pub notes: [NoteState; 128],
     pub recent_events: VecDeque<NoteEvent>,
+    /// Onset envelope since the last read, one value per `onset::HOP_SECS`.
+    pub onsets: VecDeque<f32>,
     pub level_db: f32,
     pub engine: usize,
     pub engine_error: Option<String>,
@@ -83,6 +89,7 @@ impl Default for AudioState {
         Self {
             notes: [NoteState::default(); 128],
             recent_events: VecDeque::with_capacity(64),
+            onsets: VecDeque::with_capacity(MAX_ONSETS),
             level_db: -120.0,
             engine: 0,
             engine_error: None,
@@ -255,6 +262,8 @@ fn worker(rx: Receiver<Vec<f32>>, in_rate: u32, state: Arc<Mutex<AudioState>>, c
     let mut active = usize::MAX;
     let mut engine: Option<Box<dyn PitchEngine>> = None;
     let mut dc = DcBlocker::new(in_rate);
+    let mut onset = OnsetDetector::new(in_rate);
+    let mut onsets = Vec::new();
     let mut resampler = Resampler::new(in_rate, in_rate);
     let mut tracker = Tracker::new(tracker::TrackerParams::default());
     let mut chunk = Vec::new();
@@ -294,12 +303,23 @@ fn worker(rx: Receiver<Vec<f32>>, in_rate: u32, state: Arc<Mutex<AudioState>>, c
             }
         }
 
+        dc.process(&mut chunk);
+        onset.push(&chunk, &mut onsets);
+        if !onsets.is_empty() {
+            let mut s = state.lock().unwrap();
+            for o in onsets.drain(..) {
+                if s.onsets.len() >= MAX_ONSETS {
+                    s.onsets.pop_front();
+                }
+                s.onsets.push_back(o);
+            }
+        }
+
         let Some(eng) = engine.as_mut() else {
             flush_events(&state, &mut events, None);
             continue;
         };
 
-        dc.process(&mut chunk);
         resampled.clear();
         resampler.process(&chunk, &mut resampled);
         let t0 = Instant::now();

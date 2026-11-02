@@ -116,6 +116,10 @@ pub struct Status {
     pub preset: usize,
     pub hud: bool,
     pub fps: f32,
+    /// Tempo while the beat tracker is locked, else 0.
+    pub bpm: f32,
+    /// Beats so far, so the page can tell a new one from an old one.
+    pub beats: u64,
     pub audio_on: bool,
     pub midi_port: Option<String>,
     pub midi_active: bool,

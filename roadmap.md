@@ -33,6 +33,7 @@ Three layers. **`main.rs`** owns the Nannou window and the active sketch. **`mid
 | 20 | Remove `chess` + `particles` — focus on smooth, music-driven visuals | `[DONE]` |
 | 21 | Two-stream model: automatic note-driven stream + hand-played layer in the opposite hue, knobs tune both or one (`StreamParams`); in every sketch, pads 1–3 = layer / surge / tune | `[DONE]` |
 | 22 | MPK pads (channel 10) as action triggers: bank A = sketch actions, bank B = app actions; drawn, lit and re-mappable in the panel | `[DONE]` |
+| 23 | Calm, decisive music reaction: `music.rs` turns notes and the audio onset envelope into beats (tempo-tracked from audio), a few hits per beat, a pulse, energy and a steady chord; sketches answer those instead of raw notes, knobs glide, sketch switches fade, and hard changes cross-fade; `--beats` checks the tracker on a WAV | `[DONE]` |
 
 ---
 
@@ -99,4 +100,4 @@ Cycles 1 → 2 → 3 → 4 → 1 independent Cardano systems. New collections in
 - Waveform/oscilloscope sketch driven by CC values
 - Global brightness / blackout via a master CC
 - MIDI channel filtering (channel-per-sketch mode)
-- BPM sync: detect tap tempo from note timing, quantise spawn events
+- BPM from MIDI: estimate a tempo from played notes too (audio already has one)

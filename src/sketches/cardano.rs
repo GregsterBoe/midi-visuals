@@ -1,5 +1,5 @@
 use crate::midi::{MidiState, NoteState};
-use crate::sketches::{flag_suffix, Param, Sketch, Stream, StreamParams, LAYER_HUE_SHIFT};
+use crate::sketches::{flag_suffix, Envelope, Param, Sketch, Smoothed, Stream, StreamParams, LAYER_HUE_SHIFT};
 use bytemuck::{Pod, Zeroable};
 use nannou::prelude::*;
 use nannou::rand::{thread_rng, Rng};
@@ -37,6 +37,11 @@ const IMPULSE_SCALE: f32 = 250.0;
 const KICK_STRENGTH: f32 = 0.9;   // a layer kick hits like a note at this velocity
 const KICK_GLOW_SECS: f32 = 1.5;  // how long a kick shows the layer while it's off
 const LAYER_ALPHA: f32 = 0.9;
+const GLIDE_RATE: f32 = 4.0;      // circles glide to new spacing at this rate (1/s)
+const FADE_RATE: f32 = 3.0;       // circles and collections fade in and out at this rate
+const CLEAR_SECS: f32 = 0.5;      // Clear trails fades them out over this long
+const CLEAR_FADE: f32 = 0.12;     // trail fade per frame while clearing
+const BEAT_SWELL: f32 = 0.3;      // a full beat swells the dots by this much
 
 const INDEX_OFFSETS: [usize; N_SIDES * 3] = [
     0, 1, 2,   0, 2, 3,   0, 3, 4,   0, 4, 5,
@@ -427,36 +432,101 @@ struct Deflection {
     velocity: Vec2,
 }
 
+struct Circle {
+    /// Angle from the collection's phase. It glides to `target` when the
+    /// count changes, so the circles spread out instead of jumping.
+    offset: f32,
+    target: f32,
+    lerp: f32,
+    deflection: Deflection,
+    alpha: f32,
+    dying: bool,
+}
+
 struct Collection {
-    angles_inner: Vec<f32>,
-    lerp_factors: Vec<f32>,
-    deflections: Vec<Deflection>,
+    phase: f32,
+    circles: Vec<Circle>,
+    /// Fades the whole collection in and out as collections come and go.
+    alpha: f32,
+    dying: bool,
 }
 
 impl Collection {
-    fn new(bounds: usize, angles_inner: Vec<f32>, rng: &mut impl Rng) -> Self {
-        Self {
-            lerp_factors: (0..bounds).map(|_| rng.gen_range(0.0f32..1.0)).collect(),
-            deflections: vec![Deflection::default(); bounds],
-            angles_inner,
+    /// `n` evenly spaced circles, already in place and visible.
+    fn new(n: usize, phase: f32, rng: &mut impl Rng) -> Self {
+        let mut c = Self { phase, circles: Vec::new(), alpha: 1.0, dying: false };
+        c.set_count(n, rng);
+        for circle in &mut c.circles {
+            circle.offset = circle.target;
+            circle.alpha = 1.0;
+        }
+        c
+    }
+
+    fn live(&self) -> usize {
+        self.circles.iter().filter(|c| !c.dying).count()
+    }
+
+    /// Heads for `n` evenly spaced circles: new ones split off the first
+    /// circle and glide into place, extra ones fade out where they are.
+    fn set_count(&mut self, n: usize, rng: &mut impl Rng) {
+        let n = n.clamp(1, MAX_BOUNDS);
+        let mut live = self.live();
+        for c in self.circles.iter_mut().filter(|c| c.dying) {
+            if live >= n { break; }
+            c.dying = false;
+            live += 1;
+        }
+        // Appended circles start a full turn round from the first one, so
+        // the circles stay in angle order and each glides only a little.
+        let start = self.circles.first().map_or(0.0, |c| c.offset) + TAU;
+        while live < n {
+            self.circles.push(Circle {
+                offset: start,
+                target: start,
+                lerp: rng.gen_range(0.0f32..1.0),
+                deflection: Deflection::default(),
+                alpha: 0.0,
+                dying: false,
+            });
+            live += 1;
+        }
+        for c in self.circles.iter_mut().filter(|c| !c.dying).skip(n) {
+            c.dying = true;
+        }
+        let step = TAU / n as f32;
+        for (k, c) in self.circles.iter_mut().filter(|c| !c.dying).enumerate() {
+            c.target = k as f32 * step;
         }
     }
 
-    /// Advances the inner angles by `step` and lets the springs settle.
+    /// Circles that are visible, with their absolute inner angle.
+    fn angles(&self) -> impl Iterator<Item = (f32, &Circle)> {
+        self.circles.iter().map(move |c| (self.phase + c.offset, c))
+    }
+
+    /// Advances the inner angles by `step`, glides the spacing and fades,
+    /// and lets the springs settle.
     fn advance(&mut self, step: f32, dt: f32) {
-        for a in &mut self.angles_inner {
-            *a += step;
-        }
-        for d in &mut self.deflections {
+        self.phase += step;
+        let glide = 1.0 - (-GLIDE_RATE * dt).exp();
+        let fade = 1.0 - (-FADE_RATE * dt).exp();
+        for c in &mut self.circles {
+            c.offset += (c.target - c.offset) * glide;
+            c.alpha += (if c.dying { 0.0 } else { 1.0 } - c.alpha) * fade;
+            let d = &mut c.deflection;
             d.velocity += (-SPRING_K * d.offset - SPRING_DAMP * d.velocity) * dt;
             d.offset   += d.velocity * dt;
         }
+        self.circles.retain(|c| !(c.dying && c.alpha < 0.01));
+        self.alpha += (if self.dying { 0.0 } else { 1.0 } - self.alpha) * fade;
     }
 
     /// Pushes every circle outward from its orbit, bent towards `bias`.
     fn kick(&mut self, angle_outer: f32, bias: Vec2, strength: f32) {
-        for i in 0..self.deflections.len() {
-            let orbit_angle = angle_outer + self.angles_inner[i];
+        let phase = self.phase;
+        for c in &mut self.circles {
+            let orbit_angle = angle_outer + phase + c.offset;
             let radial      = vec2(orbit_angle.cos(), orbit_angle.sin());
             let dir_raw     = radial + bias;
             let impulse_dir = if dir_raw.length_squared() > 0.001 {
@@ -464,7 +534,7 @@ impl Collection {
             } else {
                 radial
             };
-            self.deflections[i].velocity += impulse_dir * strength;
+            c.deflection.velocity += impulse_dir * strength;
         }
     }
 }
@@ -476,7 +546,14 @@ pub struct Cardano {
     collections: Vec<Collection>,
     num_collections: usize,
     bounds: usize,
-    base_alpha: f32,
+    /// Brightness: a beat brightens the dots, then they settle back.
+    s_alpha: Smoothed,
+    s_hue: Smoothed,
+    s_tension: Smoothed,
+    s_alignment: Smoothed,
+    time: f32,
+    /// Counts down from 1 while Clear trails fades them out.
+    clearing: f32,
     tunes: StreamParams,
     /// The layer: one more collection, orbiting the other way in the
     /// opposite hue. It ignores the notes; it's switched on and kicked by hand.
@@ -484,7 +561,8 @@ pub struct Cardano {
     layer: Collection,
     layer_angle_outer: f32,
     kick: bool,
-    kick_glow: f32,
+    s_layer: Smoothed,
+    kick_glow: Envelope,
     win: Cell<Rect>,
     // Per-frame dot state passed from update() to raw_render(): position, colour, radius
     current_dots: Vec<(Vec2, LinSrgba, f32)>,
@@ -516,19 +594,24 @@ impl Cardano {
     pub fn new() -> Self {
         let mut rng = thread_rng();
         let bounds = 3;
-        let angles = Self::evenly_spaced(bounds);
         Self {
             angle_outer: 0.0,
-            collections: vec![Collection::new(bounds, angles.clone(), &mut rng)],
+            collections: vec![Collection::new(bounds, 0.0, &mut rng)],
             num_collections: 1,
             bounds,
-            base_alpha: 0.9,
+            s_alpha: Smoothed::new(0.75, 6.0),
+            s_hue: Smoothed::new(0.0, 2.0),
+            s_tension: Smoothed::new(0.0, 2.0),
+            s_alignment: Smoothed::new(0.0, 3.0),
+            time: 0.0,
+            clearing: 0.0,
             tunes: StreamParams::new(PARAMS.len()),
             layer_on: false,
-            layer: Collection::new(bounds, angles, &mut rng),
+            layer: Collection::new(bounds, 0.0, &mut rng),
             layer_angle_outer: PI,
             kick: false,
-            kick_glow: 0.0,
+            s_layer: Smoothed::new(0.0, 3.0),
+            kick_glow: Envelope::new(14.0, 1.0 / KICK_GLOW_SECS),
             win: Cell::new(Rect::from_w_h(800.0, 600.0)),
             current_dots: Vec::new(),
             fade_alpha: 0.02,
@@ -538,40 +621,35 @@ impl Cardano {
         }
     }
 
-    fn evenly_spaced(bounds: usize) -> Vec<f32> {
-        let step = TAU / bounds as f32;
-        (0..bounds).map(|i| i as f32 * step).collect()
-    }
-
     fn set_bounds(&mut self, n: usize) {
-        self.bounds = n.max(1).min(MAX_BOUNDS);
-        let angles = Self::evenly_spaced(self.bounds);
+        self.bounds = n.clamp(1, MAX_BOUNDS);
         let mut rng = thread_rng();
         for c in &mut self.collections {
-            *c = Collection::new(self.bounds, angles.clone(), &mut rng);
-        }
-        // Clear the GPU texture so the old trail doesn't linger
-        if let Ok(mut g) = self.gpu.try_borrow_mut() {
-            if let Some(ref mut gpu) = *g {
-                gpu.cleared = false;
-            }
+            c.set_count(self.bounds, &mut rng);
         }
     }
 
+    /// New collections fade in at the first one's angles, for immediate
+    /// symmetry; removed ones fade out.
     fn set_num_collections(&mut self, n: usize) {
-        self.num_collections = n.max(1).min(MAX_COLLECTIONS);
-        let current_angles: Vec<f32> = self.collections.first()
-            .map(|c| c.angles_inner.clone())
-            .unwrap_or_else(|| Self::evenly_spaced(self.bounds));
-        let mut rng = thread_rng();
-        while self.collections.len() < self.num_collections {
-            self.collections.push(Collection::new(self.bounds, current_angles.clone(), &mut rng));
+        self.num_collections = n.clamp(1, MAX_COLLECTIONS);
+        let mut live = self.collections.iter().filter(|c| !c.dying).count();
+        for c in self.collections.iter_mut().filter(|c| c.dying) {
+            if live >= self.num_collections { break; }
+            c.dying = false;
+            live += 1;
         }
-        self.collections.truncate(self.num_collections);
-        if let Ok(mut g) = self.gpu.try_borrow_mut() {
-            if let Some(ref mut gpu) = *g {
-                gpu.cleared = false;
-            }
+        let phase = self.collections.first().map_or(0.0, |c| c.phase);
+        let mut rng = thread_rng();
+        while live < self.num_collections {
+            let mut c = Collection::new(self.bounds, phase, &mut rng);
+            c.alpha = 0.0;
+            self.collections.push(c);
+            live += 1;
+        }
+        let keep = self.num_collections;
+        for c in self.collections.iter_mut().filter(|c| !c.dying).skip(keep) {
+            c.dying = true;
         }
     }
 }
@@ -579,10 +657,13 @@ impl Cardano {
 impl Sketch for Cardano {
     fn update(&mut self, midi: &MidiState, dt: f32) {
         self.tunes.update(PARAMS, midi);
+        self.time += dt;
+        let music      = &midi.music;
         let hue1       = self.tunes.get(Stream::Auto, P_HUE);
         let hue2       = midi.pitch_bend;
         let new_bounds = self.tunes.get(Stream::Auto, P_CIRCLES).round() as usize;
-        let dot_r      = self.tunes.get(Stream::Auto, P_DOT_R);
+        let swell      = 1.0 + BEAT_SWELL * music.pulse;
+        let dot_r      = self.tunes.get(Stream::Auto, P_DOT_R) * swell;
         let speed      = self.tunes.get(Stream::Auto, P_SPEED);
         let ratio      = self.tunes.get(Stream::Auto, P_RATIO);
         let orbit_r    = self.tunes.get(Stream::Auto, P_ORBIT_R);
@@ -592,45 +673,50 @@ impl Sketch for Cardano {
         // Fade alpha: chosen so the trail is near-invisible after trail_len frames.
         // 1 - 0.01^(1/trail_len) gives exact "1% brightness after trail_len frames".
         self.fade_alpha = 1.0 - (0.01_f32).powf(1.0 / trail_len);
+        if self.clearing > 0.0 {
+            self.fade_alpha = self.fade_alpha.max(CLEAR_FADE);
+            self.clearing = (self.clearing - dt / CLEAR_SECS).max(0.0);
+        }
 
         if new_bounds != self.bounds {
             self.set_bounds(new_bounds);
         }
 
-        // Music theory
-        self.current_chord   = detect_chord(&midi.notes);
-        self.current_tension = tension_from_notes(&midi.notes);
-        let effective_hue1   = chord_hue(self.current_chord).unwrap_or(hue1);
+        // Music theory, from the steady chord: its hue and tension glide.
+        self.current_chord   = detect_chord(&music.held);
+        self.current_tension = self.s_tension.drive(tension_from_notes(&music.held), dt);
+        let chord_hue1       = self.s_hue.drive_hue(chord_hue(self.current_chord).unwrap_or(hue1), dt);
+        let alpha            = self.s_alpha.drive(0.75 + 0.25 * music.pulse, dt);
 
-        let wobble_amp = if self.current_tension > 0.2 {
-            (self.current_tension - 0.2) * orbit_r * 0.20
-        } else {
-            0.0
-        };
+        // Dissonance makes the orbits breathe, each circle at its own pace.
+        let wobble_amp = (self.current_tension - 0.2).max(0.0) * orbit_r * 0.20;
 
-        let alignment = align_t * TAU / self.num_collections.max(2) as f32;
+        let target_alignment = align_t * TAU / self.num_collections.max(2) as f32;
+        let alignment = self.s_alignment.drive(target_alignment, dt);
 
         self.angle_outer += speed * dt;
 
         for coll in &mut self.collections {
             coll.advance(-speed * ratio * dt, dt);
         }
+        self.collections.retain(|c| !(c.dying && c.alpha < 0.01));
 
         let mut rng = thread_rng();
 
         // Layer: turns the other way round, so it reads as its own figure.
         let l_speed  = self.tunes.get(Stream::Layer, P_SPEED);
         let l_bounds = (self.tunes.get(Stream::Layer, P_CIRCLES).round() as usize).clamp(1, MAX_BOUNDS);
-        if l_bounds != self.layer.angles_inner.len() {
-            self.layer = Collection::new(l_bounds, Self::evenly_spaced(l_bounds), &mut rng);
+        if l_bounds != self.layer.live() {
+            self.layer.set_count(l_bounds, &mut rng);
         }
         self.layer_angle_outer -= l_speed * dt;
         self.layer.advance(l_speed * self.tunes.get(Stream::Layer, P_RATIO) * dt, dt);
         if std::mem::take(&mut self.kick) {
             self.layer.kick(self.layer_angle_outer, Vec2::ZERO, KICK_STRENGTH * IMPULSE_SCALE);
-            self.kick_glow = 1.0;
+            self.kick_glow.trigger(1.0);
         }
-        self.kick_glow = (self.kick_glow - dt / KICK_GLOW_SECS).max(0.0);
+        let glow = self.kick_glow.step(dt);
+        let layer_on = self.s_layer.drive(if self.layer_on { 1.0 } else { 0.0 }, dt);
 
         // Compute current dot positions and colours (no trail storage)
         self.current_dots.clear();
@@ -639,43 +725,37 @@ impl Sketch for Cardano {
             let outer_angle = self.angle_outer + ci as f32 * alignment;
             let ox = orbit_r * outer_angle.cos();
             let oy = orbit_r * outer_angle.sin();
-            for (j, (&a, d)) in coll.angles_inner.iter().zip(&coll.deflections).enumerate() {
-                let r = if wobble_amp > 0.0 {
-                    orbit_r + rng.gen_range(-wobble_amp..wobble_amp)
-                } else {
-                    orbit_r
-                };
-                let pos = vec2(ox + r * a.cos(), oy + r * a.sin()) + d.offset;
-                let lf  = coll.lerp_factors[j];
-                let hue = (effective_hue1 + lf * (hue2 - effective_hue1) + coll_shift).rem_euclid(1.0);
-                self.current_dots.push((pos, hsl_to_lin(hue, 0.85, 0.55, self.base_alpha), dot_r));
+            for (j, (a, c)) in coll.angles().enumerate() {
+                let wobble = (self.time * 3.1 + j as f32 * 1.7 + ci as f32 * 2.3).sin();
+                let r   = orbit_r + wobble_amp * wobble;
+                let pos = vec2(ox + r * a.cos(), oy + r * a.sin()) + c.deflection.offset;
+                let hue = (chord_hue1 + c.lerp * (hue2 - chord_hue1) + coll_shift).rem_euclid(1.0);
+                let a   = alpha * c.alpha * coll.alpha;
+                self.current_dots.push((pos, hsl_to_lin(hue, 0.85, 0.55, a), dot_r));
             }
         }
 
         // A kick shows the layer for a moment even while it's off.
-        let layer_alpha = LAYER_ALPHA * if self.layer_on { 1.0 } else { self.kick_glow };
+        let layer_alpha = LAYER_ALPHA * layer_on.max(glow);
         if layer_alpha > 0.01 {
             let l_hue1  = self.tunes.get(Stream::Layer, P_HUE);
             let l_orbit = self.tunes.get(Stream::Layer, P_ORBIT_R);
             let l_dot_r = self.tunes.get(Stream::Layer, P_DOT_R);
             let ox = l_orbit * self.layer_angle_outer.cos();
             let oy = l_orbit * self.layer_angle_outer.sin();
-            let layer = &self.layer;
-            for (j, (&a, d)) in layer.angles_inner.iter().zip(&layer.deflections).enumerate() {
-                let pos = vec2(ox + l_orbit * a.cos(), oy + l_orbit * a.sin()) + d.offset;
-                let lf  = layer.lerp_factors[j];
-                let hue = (l_hue1 + lf * (hue2 - l_hue1) + LAYER_HUE_SHIFT).rem_euclid(1.0);
-                self.current_dots.push((pos, hsl_to_lin(hue, 0.85, 0.55, layer_alpha), l_dot_r));
+            for (a, c) in self.layer.angles() {
+                let pos = vec2(ox + l_orbit * a.cos(), oy + l_orbit * a.sin()) + c.deflection.offset;
+                let hue = (l_hue1 + c.lerp * (hue2 - l_hue1) + LAYER_HUE_SHIFT).rem_euclid(1.0);
+                self.current_dots.push((pos, hsl_to_lin(hue, 0.85, 0.55, layer_alpha * c.alpha), l_dot_r));
             }
         }
 
-        // Auto stream: every note kicks the collections, bent up or down by pitch.
-        for ev in midi.note_on_events() {
+        // Auto stream: every hit kicks the collections, bent up or down by pitch.
+        for ev in &music.hits {
             let pitch_bias = vec2(0.0, ev.note as f32 / 127.0 * 2.0 - 1.0);
             for coll in &mut self.collections {
                 coll.kick(self.angle_outer, pitch_bias, ev.velocity * IMPULSE_SCALE);
             }
-            self.base_alpha = ev.velocity.max(0.4);
         }
     }
 
@@ -863,13 +943,7 @@ impl Sketch for Cardano {
                 let next = self.num_collections % MAX_COLLECTIONS + 1;
                 self.set_num_collections(next);
             }
-            Key::R => {
-                if let Ok(mut g) = self.gpu.try_borrow_mut() {
-                    if let Some(ref mut gpu) = *g {
-                        gpu.cleared = false;
-                    }
-                }
-            }
+            Key::R => self.clearing = 1.0,
             _ => {}
         }
     }

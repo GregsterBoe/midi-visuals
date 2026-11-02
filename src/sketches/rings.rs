@@ -1,5 +1,5 @@
 use crate::midi::MidiState;
-use crate::sketches::{flag_suffix, Param, Sketch, Stream, StreamParams, LAYER_HUE_SHIFT};
+use crate::sketches::{flag_suffix, smoothstep, Param, Sketch, Smoothed, Stream, StreamParams, LAYER_HUE_SHIFT};
 use nannou::prelude::*;
 use nannou::rand::{thread_rng, Rng};
 use std::cell::Cell;
@@ -26,6 +26,9 @@ const RAIN_CYCLE_SECS: f32 = 10.0;
 const HALO_RINGS: usize = 12;     // rings in one halo, evenly round the rain circle
 const HALO_MIN_SPREAD: f32 = 60.0;
 
+const FADE_IN_SECS: f32 = 0.12;
+const CLEAR_SECS: f32 = 0.45;      // Clear fades the rings out over this long
+
 const N_SIDES: usize = 16;
 const MAX_RINGS: usize = 2_000;
 
@@ -37,6 +40,9 @@ pub struct Rings {
     halo: bool,
     gravity_on: bool,
     push_pull: f32,
+    // Gravity and its direction ease in rather than switching.
+    s_gravity: Smoothed,
+    s_push_pull: Smoothed,
     rain_accum: f32,
     rain_angle: f32,
     rain_flip: bool,
@@ -48,17 +54,29 @@ pub struct Rings {
 struct Ring {
     center: Vec2,
     offset: Vec2,
-    radius: f32,
+    age: f32,
+    /// Seconds to reach `max_radius`; the ring slows as it gets there.
+    life: f32,
     max_radius: f32,
-    grow_rate: f32,
     hue: f32,
     base_alpha: f32,
     stream: Stream,
+    /// 1, falling to 0 once the ring is cleared.
+    fade: f32,
+    dying: bool,
 }
 
 impl Ring {
+    fn progress(&self) -> f32 { (self.age / self.life).min(1.0) }
+
+    fn radius(&self) -> f32 {
+        let u = self.progress();
+        self.max_radius * (1.0 - (1.0 - u) * (1.0 - u))
+    }
+
     fn alpha(&self) -> f32 {
-        (1.0 - self.radius / self.max_radius).max(0.0) * self.base_alpha
+        let tail = (1.0 - self.progress()).powf(1.6);
+        self.base_alpha * smoothstep(self.age / FADE_IN_SECS) * tail * self.fade
     }
 }
 
@@ -71,6 +89,8 @@ impl Rings {
             halo: false,
             gravity_on: false,
             push_pull: 1.0,
+            s_gravity: Smoothed::new(0.0, 2.0),
+            s_push_pull: Smoothed::new(1.0, 2.5),
             rain_accum: 0.0,
             rain_angle: 0.0,
             rain_flip: false,
@@ -82,15 +102,19 @@ impl Rings {
 
     fn spawn_at(&mut self, pos: Vec2, stream: Stream, max_radius: f32, hue: f32, base_alpha: f32) {
         if self.rings.len() >= MAX_RINGS { return; }
+        // Eased growth starts at twice the average speed: at `speed`.
+        let life = (2.0 * max_radius / self.tunes.get(stream, P_SPEED).max(1.0)).max(0.3);
         self.rings.push(Ring {
             center: pos,
             offset: Vec2::ZERO,
-            radius: 2.0,
+            age: 0.0,
+            life,
             max_radius,
-            grow_rate: self.tunes.get(stream, P_SPEED),
             hue: hue.rem_euclid(1.0),
             base_alpha,
             stream,
+            fade: 1.0,
+            dying: false,
         });
     }
 
@@ -112,12 +136,13 @@ impl Rings {
             if alpha < 0.01 { continue; }
             let color = hsla(r.hue, 0.8, 0.55, alpha);
             let pos = r.center + r.offset;
+            let radius = r.radius();
             let base = self.mesh_verts.len();
             self.mesh_verts.push((vec3(pos.x, pos.y, 0.0), color));
             for i in 0..N_SIDES {
                 let angle = i as f32 * TAU / N_SIDES as f32;
                 self.mesh_verts.push((
-                    vec3(pos.x + angle.cos() * r.radius, pos.y + angle.sin() * r.radius, 0.0),
+                    vec3(pos.x + angle.cos() * radius, pos.y + angle.sin() * radius, 0.0),
                     color,
                 ));
             }
@@ -139,25 +164,28 @@ impl Sketch for Rings {
 
         self.rain_angle = (self.rain_angle + dt * TAU / RAIN_CYCLE_SECS).rem_euclid(TAU);
 
+        let gravity_mix = self.s_gravity.drive(if self.gravity_on { 1.0 } else { 0.0 }, dt);
+        let push_pull = self.s_push_pull.drive(self.push_pull, dt);
         for r in &mut self.rings {
-            r.radius += r.grow_rate * dt;
-            let gravity = self.tunes.get(r.stream, P_GRAVITY);
-            if self.gravity_on && gravity > 0.0 {
+            r.age += dt;
+            if r.dying { r.fade -= dt / CLEAR_SECS; }
+            let gravity = self.tunes.get(r.stream, P_GRAVITY) * gravity_mix;
+            if gravity > 0.0 {
                 let diff = (r.center + r.offset) - gravity_center;
                 let dist = diff.length();
                 if dist > 1.0 {
-                    r.offset += self.push_pull * gravity * (diff / dist) * dt;
+                    r.offset += push_pull * gravity * (diff / dist) * dt;
                 }
             }
         }
-        self.rings.retain(|r| r.radius < r.max_radius);
+        self.rings.retain(|r| r.age < r.life && r.fade > 0.0);
 
         let mut rng = thread_rng();
 
-        // Auto stream: a ring per note, pitch → x.
+        // Auto stream: a ring per hit, pitch → x.
         let hue   = self.tunes.get(Stream::Auto, P_HUE);
         let max_r = self.tunes.get(Stream::Auto, P_MAX_R);
-        for ev in midi.note_on_events() {
+        for ev in &midi.music.hits {
             let x = win.left() + (ev.note as f32 / 127.0) * win.w();
             let y = rng.gen_range(win.bottom() * 0.8..win.top() * 0.8);
             let r_max = max_r * (0.5 + ev.velocity * 0.5);
@@ -225,7 +253,7 @@ impl Sketch for Rings {
             Key::G => { self.rain = !self.rain; self.rain_accum = 0.0; }
             Key::B => self.halo = true,
             Key::T => self.tunes.target = self.tunes.target.next(),
-            Key::R => self.rings.clear(),
+            Key::R => self.rings.iter_mut().for_each(|r| r.dying = true),
             Key::O => self.gravity_on = !self.gravity_on,
             Key::K => self.push_pull = -self.push_pull,
             _ => {}

@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex};
 use midir::{MidiInput, MidiInputConnection};
 use serde::{Deserialize, Serialize};
 
+use crate::music::Music;
+
 #[derive(Clone, Copy, Default)]
 pub struct NoteState {
     #[allow(dead_code)]
@@ -47,6 +49,9 @@ pub struct MidiState {
     /// which lets the panel tell a new move from an old one.
     pub last_control: Option<Control>,
     pub control_moves: u64,
+    /// What the sketches react to, worked out from the notes each frame
+    /// (`main` fills it in; it is never set in the shared state).
+    pub music: Music,
 }
 
 impl Default for MidiState {
@@ -60,6 +65,7 @@ impl Default for MidiState {
             pads: [0.0; 128],
             last_control: None,
             control_moves: 0,
+            music: Music::default(),
         }
     }
 }
@@ -177,12 +183,6 @@ pub fn start() -> (Arc<Mutex<MidiState>>, Option<MidiInputConnection<()>>, Optio
             log_warn!("Failed to connect to MIDI port: {e}. Continuing without MIDI.");
             (state, None, None)
         }
-    }
-}
-
-impl MidiState {
-    pub fn note_on_events(&self) -> impl Iterator<Item = &NoteEvent> {
-        self.recent_events.iter().filter(|e| e.on)
     }
 }
 

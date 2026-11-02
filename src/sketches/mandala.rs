@@ -1,5 +1,5 @@
 use crate::midi::{MidiState, NoteState};
-use crate::sketches::{flag_suffix, Param, Sketch, Smoothed, Stream, StreamParams, LAYER_HUE_SHIFT};
+use crate::sketches::{flag_suffix, smoothstep, Envelope, Param, Sketch, Smoothed, Stream, StreamParams, LAYER_HUE_SHIFT};
 use nannou::prelude::*;
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -16,10 +16,10 @@ const P_SPEED: usize = 1;
 const P_SIZE: usize = 2;
 const P_SAT: usize = 3;
 
-const ENERGY_WINDOW: f32 = 4.0;
-const ENERGY_PEAK:   f32 = 20.0;
 const BEZ_SEGS:      usize = 18;
-const MORPH_SPEED:   f32 = 2.4;  // seconds to cross-fade: 1/2.4 ≈ 0.42s
+const MORPH_SECS:    f32 = 0.9;  // a chord's form cross-fades in over this long
+const LIS_SECS:      f32 = 0.7;  // the core figure cross-fades over this long
+const BEAT_TURN:     f32 = 0.12; // a full beat turns the rings this far (radians × spin)
 const LAYER_ROT:     usize = 7;  // ring_rot slot of the layer's halo
 const SURGE_SECS:    f32 = 1.2;  // how long a surge stretches the halo
 
@@ -59,10 +59,13 @@ fn rs(r: f32, nm: f32, form: PetalForm, spin: f32,
 
 // ── Symmetry morph ────────────────────────────────────────────────────────────
 
-struct SymmetryMorph {
-    from_specs: Vec<RingSpec>,
-    from_n:     usize,
-    t:          f32,  // 0.0 → 1.0
+/// A chord's form fading out after the next one took over.
+/// It keeps turning its own way while it fades.
+struct Ghost {
+    specs: Vec<RingSpec>,
+    rot:   Vec<f32>,
+    n:     usize,
+    alpha: f32,  // falls to 0
 }
 
 // ── Music theory ──────────────────────────────────────────────────────────────
@@ -173,12 +176,6 @@ fn detect_chord(notes: &[NoteState; 128]) -> ChordKind {
     ChordKind::Other
 }
 
-fn pitch_mask(notes: &[NoteState; 128]) -> u16 {
-    (0u8..128)
-        .filter(|&n| notes[n as usize].on)
-        .fold(0u16, |m, n| m | (1 << (n % 12)))
-}
-
 fn tension(notes: &[NoteState; 128]) -> f32 {
     let held: Vec<u8> = (0..128u8).filter(|&n| notes[n as usize].on).collect();
     if held.len() < 2 { return 0.0; }
@@ -226,8 +223,6 @@ fn lissajous_ratio(notes: &[NoteState; 128]) -> (u32, u32) {
     (1, 1)
 }
 
-fn ease_in(t: f32)  -> f32 { t * t }
-fn ease_out(t: f32) -> f32 { 1.0 - (1.0 - t) * (1.0 - t) }
 
 // ── Bezier helpers ────────────────────────────────────────────────────────────
 
@@ -280,7 +275,7 @@ fn flame_pts(half_len: f32, half_w: f32, sweep: f32) -> Vec<Vec2> {
 
 // ── Visual elements ───────────────────────────────────────────────────────────
 
-struct Pulse { radius: f32, max_r: f32, alpha: f32, hue: f32 }
+struct Pulse { radius: f32, max_r: f32, alpha: f32, hue: f32, age: f32 }
 struct Blip  { x: f32, y: f32, life: f32, size: f32, hue: f32 }
 
 /// What a ring is drawn with, beyond its spec: the stream's hue and
@@ -294,16 +289,23 @@ pub struct Mandala {
     chord:           ChordKind,
     symmetry:        usize,
     current_specs:   Vec<RingSpec>,
-    morph:           Option<SymmetryMorph>,
+    /// The current form fades in from 0 after a chord change.
+    form_alpha:      f32,
+    ghosts:          Vec<Ghost>,
     // ring_rot[0..5] = ring slots, [6] = border dots, [7] = layer halo
     ring_rot:        [f32; 8],
-    flash_alpha:     f32,
+    flash:           Envelope,
     flash_hue:       f32,
-    tension:         f32,
+    s_hue:           Smoothed,
+    s_tension:       Smoothed,
     energy:          f32,
-    note_timestamps: Vec<f32>,
-    last_pitch_mask: u16,
+    pulse:           f32,
+    /// Beats turn the rings: the target steps, the turn chases it.
+    kick_target:     f32,
+    s_kick:          Smoothed,
     lis_ratio:       (u32, u32),
+    lis_prev:        (u32, u32),
+    lis_mix:         f32,  // 0 → 1 while fading from lis_prev
     time:            f32,
     pulses:          Vec<Pulse>,
     blips:           Vec<Blip>,
@@ -314,7 +316,7 @@ pub struct Mandala {
     layer_on:        bool,
     layer_spec:      RingSpec,
     s_layer_alpha:   Smoothed,  // fades the halo in and out
-    surge:           f32,       // 1 right after a surge, falling to 0
+    surge:           Envelope,
     win:             Cell<Rect>,
 }
 
@@ -325,15 +327,20 @@ impl Mandala {
             chord,
             symmetry:        chord.symmetry(),
             current_specs:   chord.ring_specs(),
-            morph:           None,
+            form_alpha:      1.0,
+            ghosts:          Vec::new(),
             ring_rot:        [0.0; 8],
-            flash_alpha:     0.0,
+            flash:           Envelope::new(10.0, 1.6),
             flash_hue:       0.5,
-            tension:         0.0,
+            s_hue:           Smoothed::new(0.5, 2.0),
+            s_tension:       Smoothed::new(0.0, 2.0),
             energy:          0.0,
-            note_timestamps: Vec::new(),
-            last_pitch_mask: 0,
+            pulse:           0.0,
+            kick_target:     0.0,
+            s_kick:          Smoothed::new(0.0, 6.0),
             lis_ratio:       (1, 1),
+            lis_prev:        (1, 1),
+            lis_mix:         1.0,
             time:            0.0,
             pulses:          Vec::new(),
             blips:           Vec::new(),
@@ -342,9 +349,36 @@ impl Mandala {
             layer_on:        false,
             layer_spec:      rs(0.78, 2.0, PetalForm::Lotus, -1.0, 1.3, 0.50, 0.0, 0.58, 0.85, true),
             s_layer_alpha:   Smoothed::new(0.0, 3.0),
-            surge:           0.0,
+            surge:           Envelope::new(12.0, 1.0 / SURGE_SECS),
             win: Cell::new(Rect::from_w_h(800.0, 600.0)),
         }
+    }
+
+    /// The auto stream's hue: the chord's, gliding when the chord changes.
+    fn hue(&self) -> f32 { self.s_hue.value.rem_euclid(1.0) }
+
+    /// Takes on `chord`'s form: the current one fades out as a ghost.
+    fn set_chord(&mut self, chord: ChordKind) {
+        if self.form_alpha > 0.01 {
+            let specs = std::mem::take(&mut self.current_specs);
+            self.ghosts.push(Ghost {
+                rot:   self.ring_rot[..specs.len()].to_vec(),
+                specs,
+                n:     self.symmetry,
+                alpha: self.form_alpha,
+            });
+        }
+        self.chord = chord;
+        self.symmetry = chord.symmetry();
+        self.current_specs = chord.ring_specs();
+        self.form_alpha = 0.0;
+    }
+
+    fn set_lissajous(&mut self, ratio: (u32, u32)) {
+        if ratio == self.lis_ratio { return; }
+        self.lis_prev = if self.lis_mix < 0.5 { self.lis_prev } else { self.lis_ratio };
+        self.lis_ratio = ratio;
+        self.lis_mix = 0.0;
     }
 
     fn layer_hue(&self) -> f32 {
@@ -468,37 +502,42 @@ impl Mandala {
         }
     }
 
-    fn draw_border_dots(&self, draw: &Draw, cx: f32, cy: f32, max_r: f32) {
+    fn draw_border_dots(&self, draw: &Draw, cx: f32, cy: f32, max_r: f32, symmetry: usize, alpha: f32) {
         let border_r = max_r * 0.64;
-        let n   = self.symmetry * 3;
+        let n   = symmetry * 3;
         let rot = self.ring_rot[6];
-        let hue = (self.chord.hue(self.p_hue) + 0.15).rem_euclid(1.0);
+        let hue = (self.hue() + 0.15).rem_euclid(1.0);
         for i in 0..n {
             let angle = rot + i as f32 * TAU / n as f32;
             draw.ellipse()
                 .x_y(cx + border_r * angle.cos(), cy + border_r * angle.sin())
                 .radius(max_r * 0.008)
-                .color(hsla(hue, self.p_sat, 0.72, 0.45));
+                .color(hsla(hue, self.p_sat, 0.72, 0.45 * alpha));
         }
     }
 
     fn draw_core(&self, draw: &Draw, cx: f32, cy: f32, max_r: f32) {
-        let hue = self.chord.hue(self.p_hue);
+        let hue = self.hue();
         let sat = self.p_sat;
 
-        // Lissajous figure — shape determined by dominant held interval
-        let (a, b)   = self.lis_ratio;
-        let scale    = max_r * 0.095;
-        let delta    = self.time * 0.09; // slow phase drift keeps figure alive
-        let n_steps  = (a.max(b) as usize * 64).min(1024);
-        let lis_hue  = (hue + 0.06).rem_euclid(1.0);
-        let pts: Vec<Vec2> = (0..=n_steps).map(|i| {
-            let t = i as f32 / n_steps as f32 * TAU;
-            vec2(cx + scale * (a as f32 * t + delta).sin(),
-                 cy + scale * (b as f32 * t).sin())
-        }).collect();
-        draw.polyline().stroke_weight(2.0).points(pts)
-            .color(hsla(lis_hue, sat, 0.84, 0.90));
+        // Lissajous figure — shape determined by dominant held interval,
+        // cross-fading from the last one when it changes
+        let mix = smoothstep(self.lis_mix);
+        let figures = [(self.lis_prev, 1.0 - mix), (self.lis_ratio, mix)];
+        for ((a, b), alpha) in figures {
+            if alpha < 0.01 { continue; }
+            let scale    = max_r * 0.095;
+            let delta    = self.time * 0.09; // slow phase drift keeps figure alive
+            let n_steps  = (a.max(b) as usize * 64).min(1024);
+            let lis_hue  = (hue + 0.06).rem_euclid(1.0);
+            let pts: Vec<Vec2> = (0..=n_steps).map(|i| {
+                let t = i as f32 / n_steps as f32 * TAU;
+                vec2(cx + scale * (a as f32 * t + delta).sin(),
+                     cy + scale * (b as f32 * t).sin())
+            }).collect();
+            draw.polyline().stroke_weight(2.0).points(pts)
+                .color(hsla(lis_hue, sat, 0.84, 0.90 * alpha));
+        }
 
         // Pulsing center dot on top
         let pulse  = (self.time * 2.5).sin() * 0.5 + 0.5;
@@ -508,29 +547,33 @@ impl Mandala {
     }
 
     fn draw_flash(&self, draw: &Draw, win: Rect) {
-        if self.flash_alpha < 0.01 { return; }
+        let f = self.flash.value;
+        if f < 0.01 { return; }
         draw.rect().wh(win.wh())
-            .color(hsla(self.flash_hue, 0.95, 0.55,
-                        self.flash_alpha * self.flash_alpha * 0.30));
+            .color(hsla(self.flash_hue, 0.95, 0.55, f * f * 0.30));
     }
 
     fn draw_pulses(&self, draw: &Draw, cx: f32, cy: f32) {
         for p in &self.pulses {
-            if p.alpha < 0.01 { continue; }
+            // Fades in as it starts and out as it nears its last radius.
+            let alpha = p.alpha * smoothstep(p.age / 0.12)
+                * smoothstep((p.max_r + 20.0 - p.radius) / 40.0);
+            if alpha < 0.01 { continue; }
             let n_dots = 48usize;
             for i in 0..n_dots {
                 let angle = i as f32 * TAU / n_dots as f32;
                 draw.ellipse()
                     .x_y(cx + p.radius * angle.cos(), cy + p.radius * angle.sin())
                     .radius(3.5)
-                    .color(hsla(p.hue, 0.95, 0.70, p.alpha));
+                    .color(hsla(p.hue, 0.95, 0.70, alpha));
             }
         }
     }
 
     fn draw_blips(&self, draw: &Draw) {
         for b in &self.blips {
-            let t = (b.life / 1.5).min(1.0);
+            // Grows in over 0.15 s, then shrinks and fades out.
+            let t = smoothstep(b.life / 1.5) * smoothstep((1.5 - b.life) / 0.15);
             draw.ellipse().x_y(b.x, b.y).radius(b.size * t)
                 .color(hsla(b.hue, 0.92, 0.75, t * 0.88));
         }
@@ -542,6 +585,7 @@ impl Sketch for Mandala {
     fn params(&self) -> &[Param] { PARAMS }
 
     fn update(&mut self, midi: &MidiState, dt: f32) {
+        let music = &midi.music;
         self.tunes.update(PARAMS, midi);
         self.p_hue   = self.tunes.get(Stream::Auto, P_HUE);
         self.p_speed = self.tunes.get(Stream::Auto, P_SPEED);
@@ -554,64 +598,66 @@ impl Sketch for Mandala {
         let layer_speed = self.tunes.get(Stream::Layer, P_SPEED);
         self.ring_rot[LAYER_ROT] += self.layer_spec.spin * 0.25 * layer_speed * dt;
         self.s_layer_alpha.drive(if self.layer_on { 1.0 } else { 0.0 }, dt);
-        self.surge = (self.surge - dt / SURGE_SECS).max(0.0);
+        self.surge.step(dt);
+        self.flash.step(dt);
 
-        for _ in midi.note_on_events() { self.note_timestamps.push(self.time); }
-        self.note_timestamps.retain(|&t| self.time - t < ENERGY_WINDOW);
-        let target_e = (self.note_timestamps.len() as f32 / ENERGY_PEAK).min(1.0);
-        self.energy += (target_e - self.energy) * (dt * 3.0).min(1.0);
+        self.energy = music.energy;
+        self.pulse  = music.pulse;
+        self.s_tension.drive(tension(&music.held), dt);
 
-        self.tension = tension(&midi.notes);
+        // Fade the current form in and old ones out.
+        self.form_alpha = (self.form_alpha + dt / MORPH_SECS).min(1.0);
+        self.ghosts.retain_mut(|g| { g.alpha -= dt / MORPH_SECS; g.alpha > 0.0 });
+        self.lis_mix = (self.lis_mix + dt / LIS_SECS).min(1.0);
 
-        // Advance symmetry morph; clear when complete
-        if let Some(m) = &mut self.morph { m.t += dt * MORPH_SPEED; }
-        if self.morph.as_ref().map_or(false, |m| m.t >= 1.0) { self.morph = None; }
-
+        // Rings turn with the energy, and each beat turns them a step more.
+        self.kick_target += music.beat * BEAT_TURN;
+        let kick_before = self.s_kick.value;
+        let kick = self.s_kick.drive(self.kick_target, dt) - kick_before;
         let base_speed = 0.4 * self.p_speed * (0.20 + self.energy * 0.80);
         for (i, spec) in self.current_specs.iter().enumerate() {
-            self.ring_rot[i] += spec.spin * base_speed * dt;
+            self.ring_rot[i] += spec.spin * (base_speed * dt + kick);
         }
-        self.ring_rot[6] += -0.28 * base_speed * dt; // border dots
+        for g in &mut self.ghosts {
+            for (rot, spec) in g.rot.iter_mut().zip(&g.specs) {
+                *rot += spec.spin * (base_speed * dt + kick);
+            }
+        }
+        self.ring_rot[6] += -0.28 * (base_speed * dt + kick); // border dots
 
-        self.flash_alpha = (self.flash_alpha - dt * 0.55).max(0.0);
         self.pulses.retain_mut(|p| {
+            p.age    += dt;
             p.radius += 165.0 * dt;
             p.alpha  -= dt * 1.1;
             p.alpha > 0.01 && p.radius < p.max_r + 20.0
         });
         self.blips.retain_mut(|b| { b.life -= dt; b.life > 0.0 });
 
-        let cur_mask = pitch_mask(&midi.notes);
-        if cur_mask != self.last_pitch_mask {
-            self.last_pitch_mask = cur_mask;
-            self.lis_ratio = lissajous_ratio(&midi.notes);
-            let new_chord = detect_chord(&midi.notes);
+        if music.chord_changed {
+            self.set_lissajous(lissajous_ratio(&music.held));
+            let new_chord = detect_chord(&music.held);
             if new_chord != ChordKind::Other && new_chord != self.chord {
-                let old_specs = self.current_specs.clone();
-                let old_sym   = self.symmetry;
-                self.chord    = new_chord;
-                self.symmetry = new_chord.symmetry();
-                self.current_specs = new_chord.ring_specs();
-                // Start cross-fade from old → new form
-                self.morph = Some(SymmetryMorph { from_specs: old_specs, from_n: old_sym, t: 0.0 });
-                self.flash_hue   = new_chord.hue(self.p_hue);
-                self.flash_alpha = 1.0;
+                let old_sym = self.symmetry;
+                self.set_chord(new_chord);
+                self.flash_hue = new_chord.hue(self.p_hue);
+                self.flash.trigger(1.0);
                 let win   = self.win.get();
                 let max_r = Self::max_r(win, self.p_size);
                 self.pulses.push(Pulse {
                     radius: 0.0, max_r: max_r * 0.62,
-                    alpha: 1.0,  hue: self.flash_hue,
+                    alpha: 1.0,  hue: self.flash_hue, age: 0.0,
                 });
                 if (self.symmetry as i32 - old_sym as i32).unsigned_abs() >= 4 {
                     self.pulses.push(Pulse {
                         radius: max_r * 0.08, max_r: max_r * 0.72,
-                        alpha: 0.65, hue: (self.flash_hue + 0.5).rem_euclid(1.0),
+                        alpha: 0.65, hue: (self.flash_hue + 0.5).rem_euclid(1.0), age: 0.0,
                     });
                 }
             }
         }
+        self.s_hue.drive_hue(self.chord.hue(self.p_hue), dt);
 
-        for ev in midi.note_on_events() {
+        for ev in &music.hits {
             let win   = self.win.get();
             let max_r = Self::max_r(win, self.p_size);
             let cx    = win.x();
@@ -619,7 +665,7 @@ impl Sketch for Mandala {
             let note_hue = (self.flash_hue + ev.note as f32 / 127.0 * 0.18).rem_euclid(1.0);
             self.pulses.push(Pulse {
                 radius: 0.0, max_r: max_r * (0.10 + ev.velocity * 0.22),
-                alpha: ev.velocity * 0.55, hue: note_hue,
+                alpha: ev.velocity * 0.55, hue: note_hue, age: 0.0,
             });
             let ring_r_frac = self.current_specs.get(1)
                 .map_or(0.24, |s| s.r_frac);
@@ -646,12 +692,13 @@ impl Sketch for Mandala {
 
         // Layer halo, outermost so drawn first. A surge shows it for a
         // moment even while it's off.
-        let layer_alpha = self.s_layer_alpha.value.max(self.surge);
+        let surge = self.surge.value;
+        let layer_alpha = self.s_layer_alpha.value.max(surge);
         if layer_alpha > 0.01 {
             let style = RingStyle {
                 hue:     self.layer_hue(),
                 sat:     self.tunes.get(Stream::Layer, P_SAT),
-                stretch: 1.0 + self.surge * 0.8,
+                stretch: 1.0 + surge * 0.8,
                 alpha:   layer_alpha,
             };
             let layer_max_r = Self::max_r(win, self.tunes.get(Stream::Layer, P_SIZE));
@@ -659,38 +706,27 @@ impl Sketch for Mandala {
                            self.ring_rot[LAYER_ROT], self.symmetry, style);
         }
 
-        // Draw rings: outer → inner so inner renders on top.
-        // During a symmetry morph, cross-fade old form out and new form in.
+        // Draw rings: outer → inner so inner renders on top. Old forms
+        // fade out under the current one as it fades in. A beat stretches
+        // the petals a little.
         let style = |alpha| RingStyle {
-            hue:     self.chord.hue(self.p_hue),
+            hue:     self.hue(),
             sat:     self.p_sat,
-            stretch: 1.0 + self.tension * 0.48,
+            stretch: 1.0 + self.s_tension.value * 0.48 + self.pulse * 0.12,
             alpha,
         };
-        match &self.morph {
-            Some(m) if m.t < 1.0 => {
-                let a_old = ease_out(1.0 - m.t);
-                let a_new = ease_in(m.t);
-                // Old form fading out
-                for (i, spec) in m.from_specs.iter().enumerate().rev() {
-                    self.draw_ring(draw, cx, cy, max_r, spec,
-                                   self.ring_rot[i], m.from_n, style(a_old));
-                }
-                // New form fading in
-                for (i, spec) in self.current_specs.iter().enumerate().rev() {
-                    self.draw_ring(draw, cx, cy, max_r, spec,
-                                   self.ring_rot[i], self.symmetry, style(a_new));
-                }
+        for g in &self.ghosts {
+            let a = smoothstep(g.alpha);
+            for (i, spec) in g.specs.iter().enumerate().rev() {
+                self.draw_ring(draw, cx, cy, max_r, spec, g.rot[i], g.n, style(a));
             }
-            _ => {
-                for (i, spec) in self.current_specs.iter().enumerate().rev() {
-                    self.draw_ring(draw, cx, cy, max_r, spec,
-                                   self.ring_rot[i], self.symmetry, style(1.0));
-                }
-            }
+            self.draw_border_dots(draw, cx, cy, max_r, g.n, a);
         }
-
-        self.draw_border_dots(draw, cx, cy, max_r);
+        let a = smoothstep(self.form_alpha);
+        for (i, spec) in self.current_specs.iter().enumerate().rev() {
+            self.draw_ring(draw, cx, cy, max_r, spec, self.ring_rot[i], self.symmetry, style(a));
+        }
+        self.draw_border_dots(draw, cx, cy, max_r, self.symmetry, a);
         self.draw_core(draw, cx, cy, max_r);
         self.draw_pulses(draw, cx, cy);
         self.draw_blips(draw);
@@ -702,7 +738,7 @@ impl Sketch for Mandala {
         if self.layer_on { flags.push("layer"); }
         flags.extend(self.tunes.hud_flag());
         Some(format!("{} | e:{:.0}% t:{:.0}% | lis {}:{}{}",
-            self.chord.label(), self.energy * 100.0, self.tension * 100.0, a, b,
+            self.chord.label(), self.energy * 100.0, self.s_tension.value * 100.0, a, b,
             flag_suffix(&flags)))
     }
 
@@ -715,15 +751,19 @@ impl Sketch for Mandala {
             Key::G => self.layer_on = !self.layer_on,
             Key::B => {
                 // Stretch the halo and send a pulse outward from it.
-                self.surge = 1.0;
+                self.surge.trigger(1.0);
                 let r = self.layer_r(self.win.get());
                 self.pulses.push(Pulse {
                     radius: r, max_r: r * 1.6,
-                    alpha: 0.9, hue: self.layer_hue(),
+                    alpha: 0.9, hue: self.layer_hue(), age: 0.0,
                 });
             }
             Key::T => self.tunes.target = self.tunes.target.next(),
-            Key::R => *self = Self::new(),
+            // Back to the plain form, fading rather than cutting.
+            Key::R => {
+                self.set_chord(ChordKind::Other);
+                self.set_lissajous((1, 1));
+            }
             _ => {}
         }
     }

@@ -406,7 +406,7 @@ function render(s, sources) {
   lastState = s;
   const sketch = s.sketches[s.sketch] || "";
   $("now-sketch").textContent = sketch;
-  $("now-fps").textContent = `${Math.round(s.fps)} fps`;
+  $("now-fps").textContent = `${Math.round(s.fps)} fps` + (s.bpm > 0 ? ` · ${Math.round(s.bpm)} bpm` : "");
   document.title = `${sketch} · midi-visuals`;
   $("hud").checked = s.hud;
 
